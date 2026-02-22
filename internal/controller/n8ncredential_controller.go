@@ -18,11 +18,14 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -83,19 +86,25 @@ func (r *N8nCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	n8nClient, err := r.getN8nClient(ctx, credential)
 	if err != nil {
 		logger.Error(err, "Failed to create n8n client")
-		return r.updateStatus(ctx, credential, "", metav1.ConditionFalse, "ClientError", err.Error())
+		return r.updateStatus(ctx, credential, credential.Status.CredentialID, credential.Status.CredentialHash, metav1.ConditionFalse, "ClientError", err.Error())
 	}
 
 	credData, err := r.buildCredentialData(ctx, credential)
 	if err != nil {
 		logger.Error(err, "Failed to build credential data")
-		return r.updateStatus(ctx, credential, "", metav1.ConditionFalse, "DataError", err.Error())
+		return r.updateStatus(ctx, credential, credential.Status.CredentialID, credential.Status.CredentialHash, metav1.ConditionFalse, "DataError", err.Error())
+	}
+
+	credentialHash, err := hashCredentialPayload(credential.Spec.CredentialName, credential.Spec.CredentialType, credData)
+	if err != nil {
+		logger.Error(err, "Failed to hash credential payload")
+		return r.updateStatus(ctx, credential, credential.Status.CredentialID, credential.Status.CredentialHash, metav1.ConditionFalse, "HashError", err.Error())
 	}
 
 	existingCred, err := n8nClient.GetCredentialByName(ctx, credential.Spec.CredentialName)
 	if err != nil {
 		logger.Error(err, "Failed to check existing credential")
-		return r.updateStatus(ctx, credential, "", metav1.ConditionFalse, "APIError", err.Error())
+		return r.updateStatus(ctx, credential, credential.Status.CredentialID, credentialHash, metav1.ConditionFalse, "APIError", err.Error())
 	}
 
 	var credID string
@@ -105,22 +114,29 @@ func (r *N8nCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		created, createErr := n8nClient.CreateCredential(ctx, newCred)
 		if createErr != nil {
 			logger.Error(createErr, "Failed to create credential")
-			return r.updateStatus(ctx, credential, "", metav1.ConditionFalse, "CreateError", createErr.Error())
+			return r.updateStatus(ctx, credential, "", credentialHash, metav1.ConditionFalse, "CreateError", createErr.Error())
 		}
 		credID = created.ID
 		logger.Info("Created credential", "id", credID)
 	} else {
 		credID = existingCred.ID
-		logger.Info("Updating existing credential", "id", credID)
-		updateCred := &n8n.Credential{Name: credential.Spec.CredentialName, Type: credential.Spec.CredentialType, Data: credData}
-		if _, updateErr := n8nClient.UpdateCredential(ctx, credID, updateCred); updateErr != nil {
-			logger.Error(updateErr, "Failed to update credential")
-			return r.updateStatus(ctx, credential, credID, metav1.ConditionFalse, "UpdateError", updateErr.Error())
+		needsUpdate := credential.Status.CredentialID != credID ||
+			credential.Status.CredentialHash != credentialHash ||
+			credential.Status.ObservedGeneration != credential.Generation
+		if needsUpdate {
+			logger.Info("Updating existing credential", "id", credID)
+			updateCred := &n8n.Credential{Name: credential.Spec.CredentialName, Type: credential.Spec.CredentialType, Data: credData}
+			if _, updateErr := n8nClient.UpdateCredential(ctx, credID, updateCred); updateErr != nil {
+				logger.Error(updateErr, "Failed to update credential")
+				return r.updateStatus(ctx, credential, credID, credentialHash, metav1.ConditionFalse, "UpdateError", updateErr.Error())
+			}
+			logger.Info("Updated credential", "id", credID)
+		} else {
+			logger.Info("Credential is already up to date", "id", credID)
 		}
-		logger.Info("Updated credential", "id", credID)
 	}
 
-	return r.updateStatus(ctx, credential, credID, metav1.ConditionTrue, "Synced", "Credential synced successfully")
+	return r.updateStatus(ctx, credential, credID, credentialHash, metav1.ConditionTrue, "Synced", "Credential synced successfully")
 }
 
 func (r *N8nCredentialReconciler) handleDeletion(ctx context.Context, credential *n8nv1alpha1.N8nCredential) (ctrl.Result, error) {
@@ -228,6 +244,23 @@ func (r *N8nCredentialReconciler) buildCredentialData(ctx context.Context, crede
 	return data, nil
 }
 
+func hashCredentialPayload(name, credType string, data map[string]interface{}) (string, error) {
+	payload := struct {
+		Name string                 `json:"name"`
+		Type string                 `json:"type"`
+		Data map[string]interface{} `json:"data"`
+	}{
+		Name: name,
+		Type: credType,
+		Data: data,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal credential payload: %w", err)
+	}
+	return hashContent(raw), nil
+}
+
 // getSecretData retrieves credential data from a Kubernetes Secret
 func (r *N8nCredentialReconciler) getSecretData(ctx context.Context, credential *n8nv1alpha1.N8nCredential) (map[string]string, error) {
 	secretRef := credential.Spec.SecretRef
@@ -259,31 +292,34 @@ func (r *N8nCredentialReconciler) getSecretData(ctx context.Context, credential 
 }
 
 // updateStatus updates the status of the N8nCredential resource
-func (r *N8nCredentialReconciler) updateStatus(ctx context.Context, credential *n8nv1alpha1.N8nCredential, credID string, conditionStatus metav1.ConditionStatus, reason, message string) (ctrl.Result, error) {
+func (r *N8nCredentialReconciler) updateStatus(ctx context.Context, credential *n8nv1alpha1.N8nCredential, credID, credentialHash string, conditionStatus metav1.ConditionStatus, reason, message string) (ctrl.Result, error) {
+	result := ctrl.Result{RequeueAfter: 5 * time.Minute}
+	if conditionStatus == metav1.ConditionFalse {
+		result = ctrl.Result{RequeueAfter: 30 * time.Second}
+	}
+
+	original := credential.DeepCopy()
+
 	credential.Status.CredentialID = credID
+	credential.Status.CredentialHash = credentialHash
 	credential.Status.ObservedGeneration = credential.Generation
-	now := metav1.Now()
-	credential.Status.LastSyncTime = &now
 
 	condition := metav1.Condition{
 		Type:               "Ready",
 		Status:             conditionStatus,
 		ObservedGeneration: credential.Generation,
-		LastTransitionTime: now,
 		Reason:             reason,
 		Message:            message,
 	}
+	apimeta.SetStatusCondition(&credential.Status.Conditions, condition)
 
-	found := false
-	for i, c := range credential.Status.Conditions {
-		if c.Type == condition.Type {
-			credential.Status.Conditions[i] = condition
-			found = true
-			break
-		}
+	if !apiequality.Semantic.DeepEqual(original.Status, credential.Status) {
+		now := metav1.Now()
+		credential.Status.LastSyncTime = &now
 	}
-	if !found {
-		credential.Status.Conditions = append(credential.Status.Conditions, condition)
+
+	if apiequality.Semantic.DeepEqual(original.Status, credential.Status) {
+		return result, nil
 	}
 
 	if err := r.Status().Update(ctx, credential); err != nil {
@@ -291,11 +327,7 @@ func (r *N8nCredentialReconciler) updateStatus(ctx context.Context, credential *
 		return ctrl.Result{}, err
 	}
 
-	if conditionStatus == metav1.ConditionFalse {
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	return result, nil
 }
 
 func (r *N8nCredentialReconciler) indexCredentials(ctx context.Context, mgr ctrl.Manager) error {

@@ -121,6 +121,10 @@ type N8nCredentialStatus struct {
 	// +optional
 	CredentialID string `json:"credentialId,omitempty"`
 
+	// CredentialHash is a hash of the last applied credential payload.
+	// +optional
+	CredentialHash string `json:"credentialHash,omitempty"`
+
 	// Conditions represent the latest available observations of the credential's state
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

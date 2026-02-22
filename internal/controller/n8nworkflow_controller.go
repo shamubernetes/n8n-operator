@@ -25,7 +25,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -89,21 +91,19 @@ func (r *N8nWorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	n8nClient, err := r.getN8nClient(ctx, workflow)
 	if err != nil {
 		logger.Error(err, "Failed to create n8n client")
-		return r.updateStatus(ctx, workflow, "", false, "", metav1.ConditionFalse, "ClientError", err.Error())
+		return r.updateStatus(ctx, workflow, workflow.Status.WorkflowID, workflow.Status.Active, workflow.Status.WorkflowHash, metav1.ConditionFalse, "ClientError", err.Error())
 	}
 
 	workflowJSON, err := r.getWorkflowJSON(ctx, workflow)
 	if err != nil {
 		logger.Error(err, "Failed to get workflow JSON")
-		return r.updateStatus(ctx, workflow, "", false, "", metav1.ConditionFalse, "JSONError", err.Error())
+		return r.updateStatus(ctx, workflow, workflow.Status.WorkflowID, workflow.Status.Active, workflow.Status.WorkflowHash, metav1.ConditionFalse, "JSONError", err.Error())
 	}
-
-	workflowHash := hashContent(workflowJSON)
 
 	var workflowData map[string]interface{}
 	if err := json.Unmarshal(workflowJSON, &workflowData); err != nil {
 		logger.Error(err, "Failed to parse workflow JSON")
-		return r.updateStatus(ctx, workflow, "", false, "", metav1.ConditionFalse, "ParseError", err.Error())
+		return r.updateStatus(ctx, workflow, workflow.Status.WorkflowID, workflow.Status.Active, workflow.Status.WorkflowHash, metav1.ConditionFalse, "ParseError", err.Error())
 	}
 
 	workflowData["name"] = workflow.Spec.WorkflowName
@@ -117,14 +117,21 @@ func (r *N8nWorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if len(workflow.Spec.CredentialMappings) > 0 {
 		if err := r.updateCredentialIDs(ctx, workflow, workflowData); err != nil {
 			logger.Error(err, "Failed to update credential IDs")
-			return r.updateStatus(ctx, workflow, "", false, workflowHash, metav1.ConditionFalse, "CredentialError", err.Error())
+			return r.updateStatus(ctx, workflow, workflow.Status.WorkflowID, workflow.Status.Active, workflow.Status.WorkflowHash, metav1.ConditionFalse, "CredentialError", err.Error())
 		}
+	}
+
+	desiredWorkflow := buildWorkflowPayload(workflow.Spec.WorkflowName, workflowData)
+	workflowHash, err := hashWorkflowPayload(desiredWorkflow)
+	if err != nil {
+		logger.Error(err, "Failed to hash workflow payload")
+		return r.updateStatus(ctx, workflow, workflow.Status.WorkflowID, workflow.Status.Active, workflow.Status.WorkflowHash, metav1.ConditionFalse, "HashError", err.Error())
 	}
 
 	existingWf, err := n8nClient.GetWorkflowByName(ctx, workflow.Spec.WorkflowName)
 	if err != nil {
 		logger.Error(err, "Failed to check existing workflow")
-		return r.updateStatus(ctx, workflow, "", false, workflowHash, metav1.ConditionFalse, "APIError", err.Error())
+		return r.updateStatus(ctx, workflow, workflow.Status.WorkflowID, workflow.Status.Active, workflowHash, metav1.ConditionFalse, "APIError", err.Error())
 	}
 
 	var wfID string
@@ -132,9 +139,7 @@ func (r *N8nWorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	if existingWf == nil {
 		logger.Info("Creating new workflow", "name", workflow.Spec.WorkflowName)
-		newWf := buildWorkflowPayload(workflow.Spec.WorkflowName, workflowData)
-
-		created, createErr := n8nClient.CreateWorkflow(ctx, newWf)
+		created, createErr := n8nClient.CreateWorkflow(ctx, desiredWorkflow)
 		if createErr != nil {
 			logger.Error(createErr, "Failed to create workflow")
 			return r.updateStatus(ctx, workflow, "", false, workflowHash, metav1.ConditionFalse, "CreateError", createErr.Error())
@@ -144,16 +149,22 @@ func (r *N8nWorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		logger.Info("Created workflow", "id", wfID)
 	} else {
 		wfID = existingWf.ID
-		logger.Info("Updating existing workflow", "id", wfID)
-		updateWf := buildWorkflowPayload(workflow.Spec.WorkflowName, workflowData)
-
-		updated, updateErr := n8nClient.UpdateWorkflow(ctx, wfID, updateWf)
-		if updateErr != nil {
-			logger.Error(updateErr, "Failed to update workflow")
-			return r.updateStatus(ctx, workflow, wfID, existingWf.Active, workflowHash, metav1.ConditionFalse, "UpdateError", updateErr.Error())
+		isActive = existingWf.Active
+		needsUpdate := workflow.Status.WorkflowID != wfID ||
+			workflow.Status.WorkflowHash != workflowHash ||
+			workflow.Status.ObservedGeneration != workflow.Generation
+		if needsUpdate {
+			logger.Info("Updating existing workflow", "id", wfID)
+			updated, updateErr := n8nClient.UpdateWorkflow(ctx, wfID, desiredWorkflow)
+			if updateErr != nil {
+				logger.Error(updateErr, "Failed to update workflow")
+				return r.updateStatus(ctx, workflow, wfID, existingWf.Active, workflowHash, metav1.ConditionFalse, "UpdateError", updateErr.Error())
+			}
+			isActive = updated.Active
+			logger.Info("Updated workflow", "id", wfID)
+		} else {
+			logger.Info("Workflow is already up to date", "id", wfID)
 		}
-		isActive = updated.Active
-		logger.Info("Updated workflow", "id", wfID)
 	}
 
 	if workflow.Spec.Active && !isActive {
@@ -380,34 +391,44 @@ func hashContent(content []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
+func hashWorkflowPayload(wf *n8n.Workflow) (string, error) {
+	content, err := json.Marshal(wf)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal workflow payload: %w", err)
+	}
+	return hashContent(content), nil
+}
+
 // updateStatus updates the status of the N8nWorkflow resource
 func (r *N8nWorkflowReconciler) updateStatus(ctx context.Context, workflow *n8nv1alpha1.N8nWorkflow, wfID string, active bool, hash string, conditionStatus metav1.ConditionStatus, reason, message string) (ctrl.Result, error) {
+	result := ctrl.Result{RequeueAfter: 5 * time.Minute}
+	if conditionStatus == metav1.ConditionFalse {
+		result = ctrl.Result{RequeueAfter: 30 * time.Second}
+	}
+
+	original := workflow.DeepCopy()
+
 	workflow.Status.WorkflowID = wfID
 	workflow.Status.Active = active
 	workflow.Status.WorkflowHash = hash
 	workflow.Status.ObservedGeneration = workflow.Generation
-	now := metav1.Now()
-	workflow.Status.LastSyncTime = &now
 
 	condition := metav1.Condition{
 		Type:               "Ready",
 		Status:             conditionStatus,
 		ObservedGeneration: workflow.Generation,
-		LastTransitionTime: now,
 		Reason:             reason,
 		Message:            message,
 	}
+	apimeta.SetStatusCondition(&workflow.Status.Conditions, condition)
 
-	found := false
-	for i, c := range workflow.Status.Conditions {
-		if c.Type == condition.Type {
-			workflow.Status.Conditions[i] = condition
-			found = true
-			break
-		}
+	if !apiequality.Semantic.DeepEqual(original.Status, workflow.Status) {
+		now := metav1.Now()
+		workflow.Status.LastSyncTime = &now
 	}
-	if !found {
-		workflow.Status.Conditions = append(workflow.Status.Conditions, condition)
+
+	if apiequality.Semantic.DeepEqual(original.Status, workflow.Status) {
+		return result, nil
 	}
 
 	if err := r.Status().Update(ctx, workflow); err != nil {
@@ -415,11 +436,7 @@ func (r *N8nWorkflowReconciler) updateStatus(ctx context.Context, workflow *n8nv
 		return ctrl.Result{}, err
 	}
 
-	if conditionStatus == metav1.ConditionFalse {
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	return result, nil
 }
 
 func (r *N8nWorkflowReconciler) indexWorkflows(ctx context.Context, mgr ctrl.Manager) error {

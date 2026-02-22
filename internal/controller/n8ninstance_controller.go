@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"time"
 
 	promv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -1101,6 +1100,38 @@ func extractVersion(image string) string {
 }
 
 func (r *N8nInstanceReconciler) updateStatus(ctx context.Context, instance *n8nv1alpha1.N8nInstance, phase, message string) (ctrl.Result, error) {
+	return r.updateStatusFields(
+		ctx,
+		instance,
+		phase,
+		message,
+		instance.Status.Replicas,
+		instance.Status.ReadyReplicas,
+		instance.Status.WorkerReplicas,
+		instance.Status.ReadyWorkerReplicas,
+		instance.Status.URL,
+	)
+}
+
+func (r *N8nInstanceReconciler) updateStatusFields(
+	ctx context.Context,
+	instance *n8nv1alpha1.N8nInstance,
+	phase, message string,
+	replicas, readyReplicas, workerReplicas, readyWorkerReplicas int32,
+	url string,
+) (ctrl.Result, error) {
+	result := ctrl.Result{RequeueAfter: 5 * time.Minute}
+	if phase == "Failed" {
+		result = ctrl.Result{RequeueAfter: 30 * time.Second}
+	}
+
+	original := instance.DeepCopy()
+
+	instance.Status.Replicas = replicas
+	instance.Status.ReadyReplicas = readyReplicas
+	instance.Status.WorkerReplicas = workerReplicas
+	instance.Status.ReadyWorkerReplicas = readyWorkerReplicas
+	instance.Status.URL = url
 	instance.Status.Phase = phase
 	instance.Status.ObservedGeneration = instance.Generation
 
@@ -1108,36 +1139,23 @@ func (r *N8nInstanceReconciler) updateStatus(ctx context.Context, instance *n8nv
 		Type:               "Ready",
 		Status:             metav1.ConditionFalse,
 		ObservedGeneration: instance.Generation,
-		LastTransitionTime: metav1.Now(),
 		Reason:             phase,
 		Message:            message,
 	}
 	if phase == "Running" {
 		condition.Status = metav1.ConditionTrue
 	}
+	apimeta.SetStatusCondition(&instance.Status.Conditions, condition)
 
-	found := false
-	for i, c := range instance.Status.Conditions {
-		if c.Type == condition.Type {
-			if !reflect.DeepEqual(c, condition) {
-				instance.Status.Conditions[i] = condition
-			}
-			found = true
-			break
-		}
-	}
-	if !found {
-		instance.Status.Conditions = append(instance.Status.Conditions, condition)
+	if apiequality.Semantic.DeepEqual(original.Status, instance.Status) {
+		return result, nil
 	}
 
 	if err := r.Status().Update(ctx, instance); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if phase == "Failed" {
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	return result, nil
 }
 
 func (r *N8nInstanceReconciler) updateStatusFromDeployments(ctx context.Context, instance *n8nv1alpha1.N8nInstance) (ctrl.Result, error) {
@@ -1146,16 +1164,16 @@ func (r *N8nInstanceReconciler) updateStatusFromDeployments(ctx context.Context,
 		return r.updateStatus(ctx, instance, "Pending", "Waiting for main deployment")
 	}
 
-	instance.Status.Replicas = mainDeploy.Status.Replicas
-	instance.Status.ReadyReplicas = mainDeploy.Status.ReadyReplicas
-	instance.Status.WorkerReplicas = 0
-	instance.Status.ReadyWorkerReplicas = 0
+	replicas := mainDeploy.Status.Replicas
+	readyReplicas := mainDeploy.Status.ReadyReplicas
+	workerReplicas := int32(0)
+	readyWorkerReplicas := int32(0)
 
 	if r.queueWorkerEnabled(instance) {
 		workerDeploy := &appsv1.Deployment{}
 		if err := r.Get(ctx, types.NamespacedName{Name: workerDeploymentName(instance), Namespace: instance.Namespace}, workerDeploy); err == nil {
-			instance.Status.WorkerReplicas = workerDeploy.Status.Replicas
-			instance.Status.ReadyWorkerReplicas = workerDeploy.Status.ReadyReplicas
+			workerReplicas = workerDeploy.Status.Replicas
+			readyWorkerReplicas = workerDeploy.Status.ReadyReplicas
 		}
 	}
 
@@ -1163,7 +1181,7 @@ func (r *N8nInstanceReconciler) updateStatusFromDeployments(ctx context.Context,
 	message := "Deployment not ready"
 
 	if mainDeploy.Status.ReadyReplicas > 0 && mainDeploy.Status.ReadyReplicas == mainDeploy.Status.Replicas {
-		if r.queueWorkerEnabled(instance) && instance.Status.WorkerReplicas > 0 && instance.Status.ReadyWorkerReplicas != instance.Status.WorkerReplicas {
+		if r.queueWorkerEnabled(instance) && workerReplicas > 0 && readyWorkerReplicas != workerReplicas {
 			phase = "Progressing"
 			message = "Waiting for worker pods to be ready"
 		} else {
@@ -1175,21 +1193,22 @@ func (r *N8nInstanceReconciler) updateStatusFromDeployments(ctx context.Context,
 		message = "Waiting for main pods to be ready"
 	}
 
+	url := ""
 	if instance.Spec.Ingress != nil && instance.Spec.Ingress.Enabled != nil && *instance.Spec.Ingress.Enabled && instance.Spec.Ingress.Host != "" {
 		scheme := "http"
 		if len(instance.Spec.Ingress.TLS) > 0 {
 			scheme = "https"
 		}
-		instance.Status.URL = fmt.Sprintf("%s://%s", scheme, instance.Spec.Ingress.Host)
+		url = fmt.Sprintf("%s://%s", scheme, instance.Spec.Ingress.Host)
 	} else {
 		port := int32(5678)
 		if instance.Spec.Service != nil && instance.Spec.Service.Port != 0 {
 			port = instance.Spec.Service.Port
 		}
-		instance.Status.URL = fmt.Sprintf("http://%s.%s.svc:%d", instance.Name, instance.Namespace, port)
+		url = fmt.Sprintf("http://%s.%s.svc:%d", instance.Name, instance.Namespace, port)
 	}
 
-	return r.updateStatus(ctx, instance, phase, message)
+	return r.updateStatusFields(ctx, instance, phase, message, replicas, readyReplicas, workerReplicas, readyWorkerReplicas, url)
 }
 
 func boolPtr(b bool) *bool {
