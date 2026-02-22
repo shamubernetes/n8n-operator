@@ -6,12 +6,13 @@ A Kubernetes operator for managing n8n credentials and workflows declaratively.
 
 The n8n-operator enables GitOps-style management of n8n instances by providing Kubernetes Custom Resources for:
 
-- **N8nCredential** - Manage n8n credentials from Kubernetes Secrets or 1Password
+- **N8nCredential** - Manage n8n credentials from Kubernetes Secrets
 - **N8nWorkflow** - Deploy and manage n8n workflows from ConfigMaps or inline JSON
 
 ## Features
 
-- 🔐 **Credential Management**: Create and sync n8n credentials from Kubernetes Secrets or 1Password Connect
+- 🔐 **Credential Management**: Create and sync n8n credentials from Kubernetes Secrets
+- 🔌 **External Secrets Compatible**: Works with any secret backend via [External Secrets Operator](https://external-secrets.io/) (1Password, Vault, AWS Secrets Manager, etc.)
 - 📋 **Workflow Management**: Deploy workflows from ConfigMaps, with automatic credential ID injection
 - 🔄 **Self-healing**: Continuously reconciles to ensure desired state matches actual state
 - 🏷️ **GitOps Ready**: Define credentials and workflows as Kubernetes resources, synced by Flux/ArgoCD
@@ -42,7 +43,7 @@ kubectl apply -k https://github.com/shamubernetes/n8n-operator/config/default
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - https://github.com/shamubernetes/n8n-operator/config/default?ref=v0.1.0
+  - https://github.com/shamubernetes/n8n-operator/config/default?ref=v0.2.0
 ```
 
 ## Usage
@@ -76,24 +77,53 @@ spec:
   credentialName: "Postgres account"
   credentialType: postgres
   secretRef:
-    name: postgres-credentials
+    name: postgres-credentials  # Can be managed by External Secrets
   fieldMappings:
+    # Maps n8n field name -> Secret key
     host: POSTGRES_HOST
     user: POSTGRES_USER
     password: POSTGRES_PASSWORD
     database: POSTGRES_DATABASE
   data:
+    # Static values
     port: "5432"
     ssl: "disable"
 ```
 
-Create credentials from 1Password:
+### Using with External Secrets Operator
+
+The n8n-operator works seamlessly with [External Secrets Operator](https://external-secrets.io/) to pull credentials from any secret backend:
 
 ```yaml
+# 1. ExternalSecret fetches from your backend (1Password, Vault, AWS SM, etc.)
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: postgres-credentials
+  namespace: services
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: op-secret-store
+    kind: ClusterSecretStore
+  target:
+    name: postgres-credentials
+    creationPolicy: Owner
+  data:
+    - secretKey: POSTGRES_HOST
+      remoteRef:
+        key: postgres-database
+        property: host
+    - secretKey: POSTGRES_PASSWORD
+      remoteRef:
+        key: postgres-database
+        property: password
+---
+# 2. N8nCredential references the Secret created by ESO
 apiVersion: n8n.n8n.io/v1alpha1
 kind: N8nCredential
 metadata:
-  name: webhook-auth
+  name: postgres-account
   namespace: services
 spec:
   n8nInstance:
@@ -101,19 +131,13 @@ spec:
     apiKeySecretRef:
       name: n8n-api-key
       key: api-key
-  credentialName: "Webhook Auth"
-  credentialType: httpHeaderAuth
-  onePasswordRef:
-    connectHost: http://onepassword-connect.op.svc:8080
-    tokenSecretRef:
-      name: op-connect-token
-      key: token
-    vaultId: "vault-uuid"
-    itemId: "item-uuid"
-    fieldMappings:
-      value: token
-  data:
-    name: "Authorization"
+  credentialName: "Postgres account"
+  credentialType: postgres
+  secretRef:
+    name: postgres-credentials  # References the ESO-managed Secret
+  fieldMappings:
+    host: POSTGRES_HOST
+    password: POSTGRES_PASSWORD
 ```
 
 ### N8nWorkflow
@@ -249,10 +273,11 @@ make run
 │  └──────────────────────────────────────────────┘     │
 │              │                                         │
 │              ▼                                         │
-│  ┌──────────────────┐    ┌──────────────────┐        │
-│  │ Kubernetes       │    │  1Password       │        │
-│  │ Secrets          │    │  Connect         │        │
-│  └──────────────────┘    └──────────────────┘        │
+│  ┌──────────────────────────────────────────────┐     │
+│  │          Kubernetes Secrets                   │     │
+│  │  (managed by External Secrets Operator or    │     │
+│  │   any other secret management solution)      │     │
+│  └──────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────┘
 ```
 

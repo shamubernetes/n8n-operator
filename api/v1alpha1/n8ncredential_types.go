@@ -22,7 +22,7 @@ import (
 
 // N8nCredentialSpec defines the desired state of N8nCredential.
 type N8nCredentialSpec struct {
-	// N8nInstance is the reference to the n8n instance (service name or URL)
+	// N8nInstance is the reference to the n8n instance
 	// +kubebuilder:validation:Required
 	N8nInstance N8nInstanceRef `json:"n8nInstance"`
 
@@ -30,23 +30,23 @@ type N8nCredentialSpec struct {
 	// +kubebuilder:validation:Required
 	CredentialName string `json:"credentialName"`
 
-	// CredentialType is the n8n credential type (e.g., postgres, httpHeaderAuth, onePasswordApi)
+	// CredentialType is the n8n credential type (e.g., postgres, httpHeaderAuth)
 	// +kubebuilder:validation:Required
 	CredentialType string `json:"credentialType"`
 
-	// SecretRef references a Kubernetes Secret containing credential data
+	// SecretRef references a Kubernetes Secret containing credential data.
+	// The Secret can be managed by External Secrets Operator for any backend
+	// (1Password, Vault, AWS Secrets Manager, etc.)
 	// +optional
 	SecretRef *SecretReference `json:"secretRef,omitempty"`
 
-	// OnePasswordRef references a 1Password item for credential data
-	// +optional
-	OnePasswordRef *OnePasswordReference `json:"onePasswordRef,omitempty"`
-
-	// Data contains static credential data (not recommended for secrets)
+	// Data contains static credential data (use secretRef for sensitive values)
 	// +optional
 	Data map[string]string `json:"data,omitempty"`
 
-	// FieldMappings maps n8n credential fields to source fields
+	// FieldMappings maps n8n credential fields to Secret keys.
+	// Key: n8n credential field name, Value: Secret key name
+	// Example: {"password": "db-password", "host": "db-host"}
 	// +optional
 	FieldMappings map[string]string `json:"fieldMappings,omitempty"`
 }
@@ -96,29 +96,6 @@ type SecretKeyReference struct {
 	// Namespace of the Secret (defaults to the resource namespace)
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
-}
-
-// OnePasswordReference references a 1Password item
-type OnePasswordReference struct {
-	// ConnectHost is the 1Password Connect server URL
-	// +kubebuilder:validation:Required
-	ConnectHost string `json:"connectHost"`
-
-	// TokenSecretRef references the secret containing the 1Password Connect token
-	// +kubebuilder:validation:Required
-	TokenSecretRef SecretKeyReference `json:"tokenSecretRef"`
-
-	// VaultID is the 1Password vault UUID
-	// +kubebuilder:validation:Required
-	VaultID string `json:"vaultId"`
-
-	// ItemID is the 1Password item UUID
-	// +kubebuilder:validation:Required
-	ItemID string `json:"itemId"`
-
-	// FieldMappings maps n8n credential fields to 1Password field labels
-	// +optional
-	FieldMappings map[string]string `json:"fieldMappings,omitempty"`
 }
 
 // N8nCredentialStatus defines the observed state of N8nCredential.

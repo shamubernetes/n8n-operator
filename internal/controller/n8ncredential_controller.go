@@ -32,7 +32,6 @@ import (
 
 	n8nv1alpha1 "github.com/shamubernetes/n8n-operator/api/v1alpha1"
 	"github.com/shamubernetes/n8n-operator/pkg/n8n"
-	"github.com/shamubernetes/n8n-operator/pkg/onepassword"
 )
 
 // N8nCredentialReconciler reconciles a N8nCredential object
@@ -68,7 +67,7 @@ func (r *N8nCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.updateStatus(ctx, credential, "", metav1.ConditionFalse, "ClientError", err.Error())
 	}
 
-	// Build the credential data
+	// Build the credential data from Secret + static data
 	credData, err := r.buildCredentialData(ctx, credential)
 	if err != nil {
 		logger.Error(err, "Failed to build credential data")
@@ -159,7 +158,7 @@ func (r *N8nCredentialReconciler) getN8nClient(ctx context.Context, credential *
 	return n8n.NewClient(n8nURL, string(apiKey)), nil
 }
 
-// buildCredentialData builds the credential data map from various sources
+// buildCredentialData builds the credential data map from Secret + static data
 func (r *N8nCredentialReconciler) buildCredentialData(ctx context.Context, credential *n8nv1alpha1.N8nCredential) (map[string]interface{}, error) {
 	data := make(map[string]interface{})
 
@@ -168,24 +167,13 @@ func (r *N8nCredentialReconciler) buildCredentialData(ctx context.Context, crede
 		data[k] = v
 	}
 
-	// Add data from Kubernetes Secret
+	// Add data from Kubernetes Secret (can be managed by External Secrets)
 	if credential.Spec.SecretRef != nil {
 		secretData, err := r.getSecretData(ctx, credential)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get secret data: %w", err)
 		}
 		for k, v := range secretData {
-			data[k] = v
-		}
-	}
-
-	// Add data from 1Password
-	if credential.Spec.OnePasswordRef != nil {
-		opData, err := r.getOnePasswordData(ctx, credential)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get 1Password data: %w", err)
-		}
-		for k, v := range opData {
 			data[k] = v
 		}
 	}
@@ -208,68 +196,20 @@ func (r *N8nCredentialReconciler) getSecretData(ctx context.Context, credential 
 
 	result := make(map[string]string)
 	fieldMappings := credential.Spec.FieldMappings
-	if fieldMappings == nil {
-		fieldMappings = make(map[string]string)
-	}
 
 	for secretKey, secretValue := range secret.Data {
-		// Check if there's a field mapping
+		// Check if there's a field mapping (secretKey -> credField)
 		credField := secretKey
-		for cred, sec := range fieldMappings {
-			if sec == secretKey {
-				credField = cred
-				break
+		if fieldMappings != nil {
+			// FieldMappings: credField -> secretKey, so reverse lookup
+			for cred, sec := range fieldMappings {
+				if sec == secretKey {
+					credField = cred
+					break
+				}
 			}
 		}
 		result[credField] = string(secretValue)
-	}
-
-	return result, nil
-}
-
-// getOnePasswordData retrieves credential data from 1Password Connect
-func (r *N8nCredentialReconciler) getOnePasswordData(ctx context.Context, credential *n8nv1alpha1.N8nCredential) (map[string]string, error) {
-	opRef := credential.Spec.OnePasswordRef
-
-	// Get the 1Password Connect token
-	tokenSecret := &corev1.Secret{}
-	tokenRef := opRef.TokenSecretRef
-	namespace := tokenRef.Namespace
-	if namespace == "" {
-		namespace = credential.Namespace
-	}
-
-	if err := r.Get(ctx, types.NamespacedName{Name: tokenRef.Name, Namespace: namespace}, tokenSecret); err != nil {
-		return nil, fmt.Errorf("failed to get 1Password token secret: %w", err)
-	}
-
-	token, ok := tokenSecret.Data[tokenRef.Key]
-	if !ok {
-		return nil, fmt.Errorf("1Password token not found in secret at key %s", tokenRef.Key)
-	}
-
-	// Create 1Password client
-	opClient := onepassword.NewClient(opRef.ConnectHost, string(token))
-
-	// Get field values
-	fieldValues, err := opClient.GetAllFieldValues(ctx, opRef.VaultID, opRef.ItemID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Apply field mappings
-	result := make(map[string]string)
-	fieldMappings := opRef.FieldMappings
-	if fieldMappings == nil || len(fieldMappings) == 0 {
-		// No mappings, use 1Password field labels as-is
-		return fieldValues, nil
-	}
-
-	// Map 1Password fields to credential fields
-	for credField, opField := range fieldMappings {
-		if value, ok := fieldValues[opField]; ok {
-			result[credField] = value
-		}
 	}
 
 	return result, nil
