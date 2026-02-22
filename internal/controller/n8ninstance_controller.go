@@ -453,23 +453,28 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 	// Compare only the fields we explicitly manage using semantic equality
 	// This avoids issues with nil vs empty maps/slices that DeepEqual treats as different
 	needsUpdate := false
+	var updateReasons []string
 
 	// Deployment metadata
 	if !apiequality.Semantic.DeepEqual(deploy.Labels, desiredDeploy.Labels) {
 		needsUpdate = true
+		updateReasons = append(updateReasons, "labels")
 	}
 	if !apiequality.Semantic.DeepEqual(deploy.Spec.Replicas, desiredDeploy.Spec.Replicas) {
 		needsUpdate = true
+		updateReasons = append(updateReasons, "replicas")
 	}
 
 	// Pod template metadata
 	if !apiequality.Semantic.DeepEqual(deploy.Spec.Template.Labels, desiredDeploy.Spec.Template.Labels) {
 		needsUpdate = true
+		updateReasons = append(updateReasons, "template.labels")
 	}
 	// Only compare annotations if desired has some (nil/empty in desired means we don't care)
 	if len(desiredDeploy.Spec.Template.Annotations) > 0 &&
 		!apiequality.Semantic.DeepEqual(deploy.Spec.Template.Annotations, desiredDeploy.Spec.Template.Annotations) {
 		needsUpdate = true
+		updateReasons = append(updateReasons, "template.annotations")
 	}
 
 	// Container specs
@@ -479,62 +484,83 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 
 		if current.Image != desired.Image {
 			needsUpdate = true
+			updateReasons = append(updateReasons, "container.image")
 		}
 		if current.ImagePullPolicy != desired.ImagePullPolicy {
 			needsUpdate = true
+			updateReasons = append(updateReasons, "container.imagePullPolicy")
 		}
 		if !apiequality.Semantic.DeepEqual(current.Env, desired.Env) {
 			needsUpdate = true
+			updateReasons = append(updateReasons, "container.env")
 		}
 		// Only compare EnvFrom if desired has some
 		if len(desired.EnvFrom) > 0 && !apiequality.Semantic.DeepEqual(current.EnvFrom, desired.EnvFrom) {
 			needsUpdate = true
+			updateReasons = append(updateReasons, "container.envFrom")
 		}
 		if !apiequality.Semantic.DeepEqual(current.Ports, desired.Ports) {
 			needsUpdate = true
+			updateReasons = append(updateReasons, "container.ports")
 		}
 		if !apiequality.Semantic.DeepEqual(current.Resources, desired.Resources) {
 			needsUpdate = true
+			updateReasons = append(updateReasons, "container.resources")
 		}
 		if !apiequality.Semantic.DeepEqual(current.VolumeMounts, desired.VolumeMounts) {
 			needsUpdate = true
+			updateReasons = append(updateReasons, "container.volumeMounts")
 		}
 		if !apiequality.Semantic.DeepEqual(current.LivenessProbe, desired.LivenessProbe) {
 			needsUpdate = true
+			updateReasons = append(updateReasons, "container.livenessProbe")
 		}
 		if !apiequality.Semantic.DeepEqual(current.ReadinessProbe, desired.ReadinessProbe) {
 			needsUpdate = true
+			updateReasons = append(updateReasons, "container.readinessProbe")
 		}
 		if !apiequality.Semantic.DeepEqual(current.StartupProbe, desired.StartupProbe) {
 			needsUpdate = true
+			updateReasons = append(updateReasons, "container.startupProbe")
 		}
 		if !apiequality.Semantic.DeepEqual(current.SecurityContext, desired.SecurityContext) {
 			needsUpdate = true
+			updateReasons = append(updateReasons, "container.securityContext")
 		}
 	}
 
 	// Pod spec fields
 	if !apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.Volumes, desiredDeploy.Spec.Template.Spec.Volumes) {
 		needsUpdate = true
+		updateReasons = append(updateReasons, "volumes")
 	}
 	if !apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.SecurityContext, desiredDeploy.Spec.Template.Spec.SecurityContext) {
 		needsUpdate = true
+		updateReasons = append(updateReasons, "securityContext")
 	}
 	if deploy.Spec.Template.Spec.ServiceAccountName != desiredDeploy.Spec.Template.Spec.ServiceAccountName {
 		needsUpdate = true
+		updateReasons = append(updateReasons, "serviceAccountName")
 	}
 	// Only compare these if desired has values
 	if len(desiredDeploy.Spec.Template.Spec.NodeSelector) > 0 &&
 		!apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.NodeSelector, desiredDeploy.Spec.Template.Spec.NodeSelector) {
 		needsUpdate = true
+		updateReasons = append(updateReasons, "nodeSelector")
 	}
 	if len(desiredDeploy.Spec.Template.Spec.Tolerations) > 0 &&
 		!apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.Tolerations, desiredDeploy.Spec.Template.Spec.Tolerations) {
 		needsUpdate = true
+		updateReasons = append(updateReasons, "tolerations")
 	}
 	if desiredDeploy.Spec.Template.Spec.Affinity != nil &&
 		!apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.Affinity, desiredDeploy.Spec.Template.Spec.Affinity) {
 		needsUpdate = true
+		updateReasons = append(updateReasons, "affinity")
+	}
+
+	if needsUpdate {
+		logger.Info("Deployment needs update", "name", name, "reasons", updateReasons)
 	}
 
 	if needsUpdate {
