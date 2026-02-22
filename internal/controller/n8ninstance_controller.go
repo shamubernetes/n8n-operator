@@ -450,36 +450,92 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 		return false, err
 	}
 
-	// Compare only the fields we explicitly manage to avoid fighting with API server defaults
-	// Copy desired spec onto current to preserve server-set fields, then compare
-	currentCopy := deploy.DeepCopy()
-	currentCopy.Labels = desiredDeploy.Labels
-	currentCopy.Annotations = desiredDeploy.Annotations
-	currentCopy.Spec.Replicas = desiredDeploy.Spec.Replicas
-	currentCopy.Spec.Template.Labels = desiredDeploy.Spec.Template.Labels
-	currentCopy.Spec.Template.Annotations = desiredDeploy.Spec.Template.Annotations
-	// Update container specs but preserve server defaults
-	if len(currentCopy.Spec.Template.Spec.Containers) > 0 && len(desiredDeploy.Spec.Template.Spec.Containers) > 0 {
-		currentCopy.Spec.Template.Spec.Containers[0].Image = desiredDeploy.Spec.Template.Spec.Containers[0].Image
-		currentCopy.Spec.Template.Spec.Containers[0].ImagePullPolicy = desiredDeploy.Spec.Template.Spec.Containers[0].ImagePullPolicy
-		currentCopy.Spec.Template.Spec.Containers[0].Env = desiredDeploy.Spec.Template.Spec.Containers[0].Env
-		currentCopy.Spec.Template.Spec.Containers[0].EnvFrom = desiredDeploy.Spec.Template.Spec.Containers[0].EnvFrom
-		currentCopy.Spec.Template.Spec.Containers[0].Ports = desiredDeploy.Spec.Template.Spec.Containers[0].Ports
-		currentCopy.Spec.Template.Spec.Containers[0].Resources = desiredDeploy.Spec.Template.Spec.Containers[0].Resources
-		currentCopy.Spec.Template.Spec.Containers[0].VolumeMounts = desiredDeploy.Spec.Template.Spec.Containers[0].VolumeMounts
-		currentCopy.Spec.Template.Spec.Containers[0].LivenessProbe = desiredDeploy.Spec.Template.Spec.Containers[0].LivenessProbe
-		currentCopy.Spec.Template.Spec.Containers[0].ReadinessProbe = desiredDeploy.Spec.Template.Spec.Containers[0].ReadinessProbe
-		currentCopy.Spec.Template.Spec.Containers[0].StartupProbe = desiredDeploy.Spec.Template.Spec.Containers[0].StartupProbe
-		currentCopy.Spec.Template.Spec.Containers[0].SecurityContext = desiredDeploy.Spec.Template.Spec.Containers[0].SecurityContext
-	}
-	currentCopy.Spec.Template.Spec.Volumes = desiredDeploy.Spec.Template.Spec.Volumes
-	currentCopy.Spec.Template.Spec.SecurityContext = desiredDeploy.Spec.Template.Spec.SecurityContext
-	currentCopy.Spec.Template.Spec.ServiceAccountName = desiredDeploy.Spec.Template.Spec.ServiceAccountName
-	currentCopy.Spec.Template.Spec.NodeSelector = desiredDeploy.Spec.Template.Spec.NodeSelector
-	currentCopy.Spec.Template.Spec.Tolerations = desiredDeploy.Spec.Template.Spec.Tolerations
-	currentCopy.Spec.Template.Spec.Affinity = desiredDeploy.Spec.Template.Spec.Affinity
+	// Compare only the fields we explicitly manage using semantic equality
+	// This avoids issues with nil vs empty maps/slices that DeepEqual treats as different
+	needsUpdate := false
 
-	needsUpdate := !apiequality.Semantic.DeepEqual(deploy, currentCopy)
+	// Deployment metadata
+	if !apiequality.Semantic.DeepEqual(deploy.Labels, desiredDeploy.Labels) {
+		needsUpdate = true
+	}
+	if !apiequality.Semantic.DeepEqual(deploy.Spec.Replicas, desiredDeploy.Spec.Replicas) {
+		needsUpdate = true
+	}
+
+	// Pod template metadata
+	if !apiequality.Semantic.DeepEqual(deploy.Spec.Template.Labels, desiredDeploy.Spec.Template.Labels) {
+		needsUpdate = true
+	}
+	// Only compare annotations if desired has some (nil/empty in desired means we don't care)
+	if len(desiredDeploy.Spec.Template.Annotations) > 0 &&
+		!apiequality.Semantic.DeepEqual(deploy.Spec.Template.Annotations, desiredDeploy.Spec.Template.Annotations) {
+		needsUpdate = true
+	}
+
+	// Container specs
+	if len(deploy.Spec.Template.Spec.Containers) > 0 && len(desiredDeploy.Spec.Template.Spec.Containers) > 0 {
+		current := &deploy.Spec.Template.Spec.Containers[0]
+		desired := &desiredDeploy.Spec.Template.Spec.Containers[0]
+
+		if current.Image != desired.Image {
+			needsUpdate = true
+		}
+		if current.ImagePullPolicy != desired.ImagePullPolicy {
+			needsUpdate = true
+		}
+		if !apiequality.Semantic.DeepEqual(current.Env, desired.Env) {
+			needsUpdate = true
+		}
+		// Only compare EnvFrom if desired has some
+		if len(desired.EnvFrom) > 0 && !apiequality.Semantic.DeepEqual(current.EnvFrom, desired.EnvFrom) {
+			needsUpdate = true
+		}
+		if !apiequality.Semantic.DeepEqual(current.Ports, desired.Ports) {
+			needsUpdate = true
+		}
+		if !apiequality.Semantic.DeepEqual(current.Resources, desired.Resources) {
+			needsUpdate = true
+		}
+		if !apiequality.Semantic.DeepEqual(current.VolumeMounts, desired.VolumeMounts) {
+			needsUpdate = true
+		}
+		if !apiequality.Semantic.DeepEqual(current.LivenessProbe, desired.LivenessProbe) {
+			needsUpdate = true
+		}
+		if !apiequality.Semantic.DeepEqual(current.ReadinessProbe, desired.ReadinessProbe) {
+			needsUpdate = true
+		}
+		if !apiequality.Semantic.DeepEqual(current.StartupProbe, desired.StartupProbe) {
+			needsUpdate = true
+		}
+		if !apiequality.Semantic.DeepEqual(current.SecurityContext, desired.SecurityContext) {
+			needsUpdate = true
+		}
+	}
+
+	// Pod spec fields
+	if !apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.Volumes, desiredDeploy.Spec.Template.Spec.Volumes) {
+		needsUpdate = true
+	}
+	if !apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.SecurityContext, desiredDeploy.Spec.Template.Spec.SecurityContext) {
+		needsUpdate = true
+	}
+	if deploy.Spec.Template.Spec.ServiceAccountName != desiredDeploy.Spec.Template.Spec.ServiceAccountName {
+		needsUpdate = true
+	}
+	// Only compare these if desired has values
+	if len(desiredDeploy.Spec.Template.Spec.NodeSelector) > 0 &&
+		!apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.NodeSelector, desiredDeploy.Spec.Template.Spec.NodeSelector) {
+		needsUpdate = true
+	}
+	if len(desiredDeploy.Spec.Template.Spec.Tolerations) > 0 &&
+		!apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.Tolerations, desiredDeploy.Spec.Template.Spec.Tolerations) {
+		needsUpdate = true
+	}
+	if desiredDeploy.Spec.Template.Spec.Affinity != nil &&
+		!apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.Affinity, desiredDeploy.Spec.Template.Spec.Affinity) {
+		needsUpdate = true
+	}
 
 	if needsUpdate {
 		// Apply our changes to the current deployment to preserve server-managed fields
@@ -573,8 +629,9 @@ func (r *N8nInstanceReconciler) buildDeployment(ctx context.Context, instance *n
 		containers = append(containers, instance.Spec.SidecarContainers...)
 	}
 
-	podAnnotations := map[string]string{}
-	if instance.Spec.PodAnnotations != nil {
+	// Use nil instead of empty map to match API server behavior and prevent reconcile loops
+	var podAnnotations map[string]string
+	if len(instance.Spec.PodAnnotations) > 0 {
 		podAnnotations = instance.Spec.PodAnnotations
 	}
 
