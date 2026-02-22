@@ -18,15 +18,44 @@ The n8n-operator enables GitOps-style management of n8n instances by providing K
 
 ## Installation
 
+### Prerequisites
+
+- Kubernetes cluster (1.26+)
+- kubectl configured
+- n8n instance with API access enabled
+
+### Quick Install
+
 ```bash
 # Install CRDs
-kubectl apply -f config/crd/bases/
+kubectl apply -f https://raw.githubusercontent.com/shamubernetes/n8n-operator/main/config/crd/bases/n8n.n8n.io_n8ncredentials.yaml
+kubectl apply -f https://raw.githubusercontent.com/shamubernetes/n8n-operator/main/config/crd/bases/n8n.n8n.io_n8nworkflows.yaml
 
 # Install operator
-kubectl apply -f config/manager/
+kubectl apply -k https://github.com/shamubernetes/n8n-operator/config/default
+```
+
+### Using Kustomize
+
+```yaml
+# kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/shamubernetes/n8n-operator/config/default?ref=v0.1.0
 ```
 
 ## Usage
+
+### Prerequisites
+
+Create a secret with your n8n API key:
+
+```bash
+kubectl create secret generic n8n-api-key \
+  --from-literal=api-key=YOUR_N8N_API_KEY \
+  -n services
+```
 
 ### N8nCredential
 
@@ -53,6 +82,9 @@ spec:
     user: POSTGRES_USER
     password: POSTGRES_PASSWORD
     database: POSTGRES_DATABASE
+  data:
+    port: "5432"
+    ssl: "disable"
 ```
 
 Create credentials from 1Password:
@@ -61,7 +93,7 @@ Create credentials from 1Password:
 apiVersion: n8n.n8n.io/v1alpha1
 kind: N8nCredential
 metadata:
-  name: postgres-account
+  name: webhook-auth
   namespace: services
 spec:
   n8nInstance:
@@ -69,18 +101,19 @@ spec:
     apiKeySecretRef:
       name: n8n-api-key
       key: api-key
-  credentialName: "Postgres account"
-  credentialType: postgres
+  credentialName: "Webhook Auth"
+  credentialType: httpHeaderAuth
   onePasswordRef:
     connectHost: http://onepassword-connect.op.svc:8080
     tokenSecretRef:
       name: op-connect-token
       key: token
-    vaultId: "abc123"
-    itemId: "def456"
+    vaultId: "vault-uuid"
+    itemId: "item-uuid"
     fieldMappings:
-      user: POSTGRES_USER
-      password: POSTGRES_PASSWORD
+      value: token
+  data:
+    name: "Authorization"
 ```
 
 ### N8nWorkflow
@@ -105,15 +138,63 @@ spec:
     kind: ConfigMap
     name: n8n-workflows
     key: my-workflow.json
+  # Optional: Map credential names to N8nCredential resources
   credentialMappings:
-    "Postgres account": postgres-account  # Maps to N8nCredential resource
+    "Postgres account": postgres-account
+```
+
+Deploy a workflow with inline JSON:
+
+```yaml
+apiVersion: n8n.n8n.io/v1alpha1
+kind: N8nWorkflow
+metadata:
+  name: simple-workflow
+  namespace: services
+spec:
+  n8nInstance:
+    url: http://n8n.services.svc:5678
+    apiKeySecretRef:
+      name: n8n-api-key
+      key: api-key
+  workflowName: "Simple Workflow"
+  active: false
+  workflow:
+    nodes:
+      - parameters: {}
+        id: manual-trigger
+        name: Manual Trigger
+        type: n8n-nodes-base.manualTrigger
+        typeVersion: 1
+        position: [0, 0]
+    connections: {}
+    settings:
+      executionOrder: v1
+```
+
+## Status
+
+Check the status of your resources:
+
+```bash
+# List credentials
+kubectl get n8ncredentials -n services
+
+# Get credential details
+kubectl describe n8ncredential postgres-account -n services
+
+# List workflows
+kubectl get n8nworkflows -n services
+
+# Get workflow details
+kubectl describe n8nworkflow my-workflow -n services
 ```
 
 ## Development
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.23+
 - Docker
 - kubectl
 - Access to a Kubernetes cluster
@@ -124,11 +205,11 @@ spec:
 # Build the operator
 make build
 
-# Build and push Docker image
-make docker-build docker-push IMG=<registry>/n8n-operator:tag
+# Build Docker image
+make docker-build IMG=ghcr.io/shamubernetes/n8n-operator:dev
 
-# Generate manifests after changing types
-make manifests generate
+# Run tests
+make test
 ```
 
 ### Running locally
@@ -137,14 +218,8 @@ make manifests generate
 # Install CRDs
 make install
 
-# Run the operator locally
+# Run the operator locally (outside cluster)
 make run
-```
-
-### Running tests
-
-```bash
-make test
 ```
 
 ## Architecture
