@@ -1,23 +1,23 @@
 {
-  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:best-practices",
-    "docker:enableMajor"
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: [
+    'config:best-practices',
+    'docker:enableMajor',
   ],
-  "customManagers": [
+  customManagers: [
     {
-      "customType": "regex",
-      "fileMatch": [
-        "(^|/)Makefile$"
+      customType: 'regex',
+      managerFilePatterns: [
+        '/(^|/)Makefile$/',
       ],
-      "matchStrings": [
-        "GOLANGCI_LINT_VERSION \\?= (?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      matchStrings: [
+        'GOLANGCI_LINT_VERSION \\?= (?<currentValue>v\\d+\\.\\d+\\.\\d+)',
       ],
-      "depNameTemplate": "golangci/golangci-lint",
-      "datasourceTemplate": "github-releases"
-    }
+      depNameTemplate: 'golangci/golangci-lint',
+      datasourceTemplate: 'github-releases',
+    },
   ],
-  "enabled": true,
-  "configWarningReuseIssue": true,
-  "configMigration": true
+  enabled: true,
+  configWarningReuseIssue: true,
+  configMigration: true,
 }
