@@ -413,10 +413,7 @@ func (r *N8nInstanceReconciler) buildEnvVars(ctx context.Context, instance *n8nv
 	env = append(env, corev1.EnvVar{Name: "DB_TYPE", Value: db.Type})
 
 	if db.SecretRef != nil {
-		namespace := db.SecretRef.Namespace
-		if namespace == "" {
-			namespace = instance.Namespace
-		}
+		// Note: SecretKeyRef uses LocalObjectReference which is namespace-local
 		env = append(env,
 			corev1.EnvVar{Name: "DB_POSTGRESDB_HOST", ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
