@@ -200,13 +200,11 @@ func (r *N8nCredentialReconciler) getSecretData(ctx context.Context, credential 
 	for secretKey, secretValue := range secret.Data {
 		// Check if there's a field mapping (secretKey -> credField)
 		credField := secretKey
-		if fieldMappings != nil {
-			// FieldMappings: credField -> secretKey, so reverse lookup
-			for cred, sec := range fieldMappings {
-				if sec == secretKey {
-					credField = cred
-					break
-				}
+		// FieldMappings: credField -> secretKey, so reverse lookup
+		for cred, sec := range fieldMappings {
+			if sec == secretKey {
+				credField = cred
+				break
 			}
 		}
 		result[credField] = string(secretValue)

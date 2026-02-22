@@ -380,12 +380,8 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 	}
 
 	// Check if update needed
-	needsUpdate := false
-
 	// Check replicas
-	if deploy.Spec.Replicas == nil || *deploy.Spec.Replicas != *desiredDeploy.Spec.Replicas {
-		needsUpdate = true
-	}
+	needsUpdate := deploy.Spec.Replicas == nil || *deploy.Spec.Replicas != *desiredDeploy.Spec.Replicas
 
 	// Check image
 	if len(deploy.Spec.Template.Spec.Containers) > 0 && len(desiredDeploy.Spec.Template.Spec.Containers) > 0 {

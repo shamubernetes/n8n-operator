@@ -195,7 +195,7 @@ func main() {
 	if err := (&controller.N8nInstanceReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("n8ninstance-controller"),
+		Recorder: mgr.GetEventRecorderFor("n8ninstance-controller"), //nolint:staticcheck // TODO: migrate to new events API
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "N8nInstance")
 		os.Exit(1)
