@@ -31,16 +31,38 @@ The n8n-operator provides a complete solution for running n8n in Kubernetes:
 ### Quick Install
 
 ```bash
-# Install CRDs
-kubectl apply -f https://raw.githubusercontent.com/shamubernetes/n8n-operator/main/config/crd/bases/n8n.n8n.io_n8ninstances.yaml
-kubectl apply -f https://raw.githubusercontent.com/shamubernetes/n8n-operator/main/config/crd/bases/n8n.n8n.io_n8ncredentials.yaml
-kubectl apply -f https://raw.githubusercontent.com/shamubernetes/n8n-operator/main/config/crd/bases/n8n.n8n.io_n8nworkflows.yaml
-
-# Install operator
-kubectl apply -k https://github.com/shamubernetes/n8n-operator/config/default
+# Install from GitHub Container Registry (OCI Helm chart)
+# Replace 0.3.0 with the chart version you want
+helm install n8n-operator oci://ghcr.io/shamubernetes/charts/n8n-operator \
+  --version 0.3.0 \
+  --namespace n8n-operator-system \
+  --create-namespace
 ```
 
-### Using Kustomize
+The Helm release includes:
+- CRDs
+- RBAC
+- Controller manager deployment
+
+CRDs are installed by default (`crd.enable=true`) and are kept on uninstall (`crd.keep=true`).
+Charts are published automatically by GitHub Actions on every `v*` git tag.
+
+### Local Chart (Development)
+
+```bash
+git clone https://github.com/shamubernetes/n8n-operator.git
+cd n8n-operator
+
+# Generate dist/chart from Kubebuilder config
+go install sigs.k8s.io/kubebuilder/v4@v4.12.0
+"$(go env GOPATH)"/bin/kubebuilder edit --plugins=helm/v2-alpha
+
+helm upgrade --install n8n-operator ./dist/chart \
+  --namespace n8n-operator-system \
+  --create-namespace
+```
+
+### Using Kustomize (Alternative)
 
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1

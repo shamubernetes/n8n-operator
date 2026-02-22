@@ -30,6 +30,15 @@ jobs:
         with:
           go-version: '1.26'
 
+      - name: Generate Helm chart
+        run: |
+          go install sigs.k8s.io/kubebuilder/v4@v4.12.0
+          KUBEBUILDER_BIN="$(go env GOBIN)"
+          if [ -z "${KUBEBUILDER_BIN}" ]; then
+            KUBEBUILDER_BIN="$(go env GOPATH)/bin"
+          fi
+          "${KUBEBUILDER_BIN}/kubebuilder" edit --plugins=helm/v2-alpha
+
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@ef12d5b165b596e3aa44ea8198d8fde563eab402 # v1
 
@@ -61,6 +70,36 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.18.6
+
+      - name: Prepare chart metadata
+        env:
+          IMAGE_TAG: ${{ github.ref_name }}
+        run: |
+          CHART_VERSION="${IMAGE_TAG#v}"
+          sed -i "s/^version: .*/version: ${CHART_VERSION}/" dist/chart/Chart.yaml
+          sed -i "s/^appVersion: .*/appVersion: \"${IMAGE_TAG}\"/" dist/chart/Chart.yaml
+          sed -i "s|^    repository: .*|    repository: ghcr.io/${GITHUB_REPOSITORY}|" dist/chart/values.yaml
+          sed -i "s/^    tag: .*/    tag: ${CHART_VERSION}/" dist/chart/values.yaml
+
+      - name: Lint chart
+        run: helm lint dist/chart
+
+      - name: Package chart
+        run: |
+          mkdir -p .release/charts
+          helm package dist/chart --destination .release/charts
+
+      - name: Push chart to GHCR (OCI)
+        env:
+          HELM_REGISTRY_CONFIG: /tmp/helm-registry/config.json
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push .release/charts/*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+
       - name: Generate changelog
         id: changelog
         uses: orhun/git-cliff-action@c93ef52f3d0ddcdcc9bd5447d98d458a11cd4f72 # v4
@@ -75,3 +114,4 @@ jobs:
           body: ${{ steps.changelog.outputs.content }}
           draft: false
           prerelease: ${{ contains(github.ref, '-') }}
+          files: .release/charts/*.tgz

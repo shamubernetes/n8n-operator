@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/n8n.n8n.io_n8ncredentials.yaml
+- bases/n8n.n8n.io_n8ninstances.yaml
 - bases/n8n.n8n.io_n8nworkflows.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
