@@ -25,16 +25,27 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	n8nv1alpha1 "github.com/shamubernetes/n8n-operator/api/v1alpha1"
 	"github.com/shamubernetes/n8n-operator/pkg/n8n"
+)
+
+const (
+	n8nWorkflowFinalizer = "n8n.n8n.io/workflow-finalizer"
+
+	workflowSourceConfigMapField = "n8nworkflow.sourceConfigMap"
+	workflowSourceSecretField    = "n8nworkflow.sourceSecret"
+	workflowAPIKeyField          = "n8nworkflow.apiKeySecretRef"
 )
 
 // N8nWorkflowReconciler reconciles a N8nWorkflow object
@@ -46,6 +57,7 @@ type N8nWorkflowReconciler struct {
 // +kubebuilder:rbac:groups=n8n.n8n.io,resources=n8nworkflows,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=n8n.n8n.io,resources=n8nworkflows/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=n8n.n8n.io,resources=n8nworkflows/finalizers,verbs=update
+// +kubebuilder:rbac:groups=n8n.n8n.io,resources=n8ncredentials,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
@@ -53,10 +65,9 @@ type N8nWorkflowReconciler struct {
 func (r *N8nWorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Fetch the N8nWorkflow instance
 	workflow := &n8nv1alpha1.N8nWorkflow{}
 	if err := r.Get(ctx, req.NamespacedName, workflow); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			logger.Info("N8nWorkflow resource not found, ignoring")
 			return ctrl.Result{}, nil
 		}
@@ -64,41 +75,45 @@ func (r *N8nWorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	// Get the n8n API client
+	if !workflow.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, workflow)
+	}
+
+	if !controllerutil.ContainsFinalizer(workflow, n8nWorkflowFinalizer) {
+		controllerutil.AddFinalizer(workflow, n8nWorkflowFinalizer)
+		if err := r.Update(ctx, workflow); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	n8nClient, err := r.getN8nClient(ctx, workflow)
 	if err != nil {
 		logger.Error(err, "Failed to create n8n client")
 		return r.updateStatus(ctx, workflow, "", false, "", metav1.ConditionFalse, "ClientError", err.Error())
 	}
 
-	// Get the workflow JSON
 	workflowJSON, err := r.getWorkflowJSON(ctx, workflow)
 	if err != nil {
 		logger.Error(err, "Failed to get workflow JSON")
 		return r.updateStatus(ctx, workflow, "", false, "", metav1.ConditionFalse, "JSONError", err.Error())
 	}
 
-	// Calculate hash of workflow content
 	workflowHash := hashContent(workflowJSON)
 
-	// Parse the workflow JSON
 	var workflowData map[string]interface{}
 	if err := json.Unmarshal(workflowJSON, &workflowData); err != nil {
 		logger.Error(err, "Failed to parse workflow JSON")
 		return r.updateStatus(ctx, workflow, "", false, "", metav1.ConditionFalse, "ParseError", err.Error())
 	}
 
-	// Set the workflow name from spec
 	workflowData["name"] = workflow.Spec.WorkflowName
 
-	// Remove fields that shouldn't be in the request
 	delete(workflowData, "id")
 	delete(workflowData, "versionId")
 	delete(workflowData, "createdAt")
 	delete(workflowData, "updatedAt")
-	delete(workflowData, "active") // Active is set separately
+	delete(workflowData, "active")
 
-	// Update credential IDs in the workflow if mappings are provided
 	if len(workflow.Spec.CredentialMappings) > 0 {
 		if err := r.updateCredentialIDs(ctx, workflow, workflowData); err != nil {
 			logger.Error(err, "Failed to update credential IDs")
@@ -106,7 +121,6 @@ func (r *N8nWorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	// Check if workflow exists in n8n
 	existingWf, err := n8nClient.GetWorkflowByName(ctx, workflow.Spec.WorkflowName)
 	if err != nil {
 		logger.Error(err, "Failed to check existing workflow")
@@ -117,84 +131,45 @@ func (r *N8nWorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	var isActive bool
 
 	if existingWf == nil {
-		// Create new workflow
 		logger.Info("Creating new workflow", "name", workflow.Spec.WorkflowName)
+		newWf := buildWorkflowPayload(workflow.Spec.WorkflowName, workflowData)
 
-		newWf := &n8n.Workflow{
-			Name: workflow.Spec.WorkflowName,
-		}
-		// Copy nodes, connections, settings from parsed data
-		if nodes, ok := workflowData["nodes"].([]interface{}); ok {
-			newWf.Nodes = make([]map[string]interface{}, len(nodes))
-			for i, n := range nodes {
-				if nodeMap, ok := n.(map[string]interface{}); ok {
-					newWf.Nodes[i] = nodeMap
-				}
-			}
-		}
-		if connections, ok := workflowData["connections"].(map[string]interface{}); ok {
-			newWf.Connections = connections
-		}
-		if settings, ok := workflowData["settings"].(map[string]interface{}); ok {
-			newWf.Settings = settings
-		}
-
-		created, err := n8nClient.CreateWorkflow(ctx, newWf)
-		if err != nil {
-			logger.Error(err, "Failed to create workflow")
-			return r.updateStatus(ctx, workflow, "", false, workflowHash, metav1.ConditionFalse, "CreateError", err.Error())
+		created, createErr := n8nClient.CreateWorkflow(ctx, newWf)
+		if createErr != nil {
+			logger.Error(createErr, "Failed to create workflow")
+			return r.updateStatus(ctx, workflow, "", false, workflowHash, metav1.ConditionFalse, "CreateError", createErr.Error())
 		}
 		wfID = created.ID
 		isActive = created.Active
 		logger.Info("Created workflow", "id", wfID)
 	} else {
-		// Update existing workflow
 		wfID = existingWf.ID
 		logger.Info("Updating existing workflow", "id", wfID)
+		updateWf := buildWorkflowPayload(workflow.Spec.WorkflowName, workflowData)
 
-		updateWf := &n8n.Workflow{
-			Name: workflow.Spec.WorkflowName,
-		}
-		// Copy nodes, connections, settings from parsed data
-		if nodes, ok := workflowData["nodes"].([]interface{}); ok {
-			updateWf.Nodes = make([]map[string]interface{}, len(nodes))
-			for i, n := range nodes {
-				if nodeMap, ok := n.(map[string]interface{}); ok {
-					updateWf.Nodes[i] = nodeMap
-				}
-			}
-		}
-		if connections, ok := workflowData["connections"].(map[string]interface{}); ok {
-			updateWf.Connections = connections
-		}
-		if settings, ok := workflowData["settings"].(map[string]interface{}); ok {
-			updateWf.Settings = settings
-		}
-
-		updated, err := n8nClient.UpdateWorkflow(ctx, wfID, updateWf)
-		if err != nil {
-			logger.Error(err, "Failed to update workflow")
-			return r.updateStatus(ctx, workflow, wfID, existingWf.Active, workflowHash, metav1.ConditionFalse, "UpdateError", err.Error())
+		updated, updateErr := n8nClient.UpdateWorkflow(ctx, wfID, updateWf)
+		if updateErr != nil {
+			logger.Error(updateErr, "Failed to update workflow")
+			return r.updateStatus(ctx, workflow, wfID, existingWf.Active, workflowHash, metav1.ConditionFalse, "UpdateError", updateErr.Error())
 		}
 		isActive = updated.Active
 		logger.Info("Updated workflow", "id", wfID)
 	}
 
-	// Handle activation state
 	if workflow.Spec.Active && !isActive {
 		logger.Info("Activating workflow", "id", wfID)
-		activated, err := n8nClient.ActivateWorkflow(ctx, wfID)
-		if err != nil {
-			logger.Error(err, "Failed to activate workflow")
-			return r.updateStatus(ctx, workflow, wfID, false, workflowHash, metav1.ConditionFalse, "ActivationError", err.Error())
+		activated, actErr := n8nClient.ActivateWorkflow(ctx, wfID)
+		if actErr != nil {
+			logger.Error(actErr, "Failed to activate workflow")
+			return r.updateStatus(ctx, workflow, wfID, false, workflowHash, metav1.ConditionFalse, "ActivationError", actErr.Error())
 		}
 		isActive = activated.Active
 	} else if !workflow.Spec.Active && isActive {
 		logger.Info("Deactivating workflow", "id", wfID)
-		deactivated, err := n8nClient.DeactivateWorkflow(ctx, wfID)
-		if err != nil {
-			logger.Error(err, "Failed to deactivate workflow")
-			return r.updateStatus(ctx, workflow, wfID, true, workflowHash, metav1.ConditionFalse, "DeactivationError", err.Error())
+		deactivated, deactErr := n8nClient.DeactivateWorkflow(ctx, wfID)
+		if deactErr != nil {
+			logger.Error(deactErr, "Failed to deactivate workflow")
+			return r.updateStatus(ctx, workflow, wfID, true, workflowHash, metav1.ConditionFalse, "DeactivationError", deactErr.Error())
 		}
 		isActive = deactivated.Active
 	}
@@ -202,9 +177,72 @@ func (r *N8nWorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return r.updateStatus(ctx, workflow, wfID, isActive, workflowHash, metav1.ConditionTrue, "Synced", "Workflow synced successfully")
 }
 
+func buildWorkflowPayload(name string, workflowData map[string]interface{}) *n8n.Workflow {
+	wf := &n8n.Workflow{Name: name}
+	if nodes, ok := workflowData["nodes"].([]interface{}); ok {
+		wf.Nodes = make([]map[string]interface{}, len(nodes))
+		for i, n := range nodes {
+			if nodeMap, ok := n.(map[string]interface{}); ok {
+				wf.Nodes[i] = nodeMap
+			}
+		}
+	}
+	if connections, ok := workflowData["connections"].(map[string]interface{}); ok {
+		wf.Connections = connections
+	}
+	if settings, ok := workflowData["settings"].(map[string]interface{}); ok {
+		wf.Settings = settings
+	}
+	return wf
+}
+
+func (r *N8nWorkflowReconciler) handleDeletion(ctx context.Context, workflow *n8nv1alpha1.N8nWorkflow) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(workflow, n8nWorkflowFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	if workflow.Spec.DeletionPolicy == n8nv1alpha1.DeletionPolicyDelete {
+		n8nClient, err := r.getN8nClient(ctx, workflow)
+		if err != nil {
+			if !shouldForceFinalize(workflow.DeletionTimestamp, err) {
+				return ctrl.Result{}, err
+			}
+			log.FromContext(ctx).Error(err, "Workflow cleanup failed, forcing finalizer removal", "name", workflow.Name)
+		} else {
+			wfID := workflow.Status.WorkflowID
+			if wfID == "" {
+				existing, lookupErr := n8nClient.GetWorkflowByName(ctx, workflow.Spec.WorkflowName)
+				if lookupErr != nil {
+					if !shouldForceFinalize(workflow.DeletionTimestamp, lookupErr) {
+						return ctrl.Result{}, lookupErr
+					}
+					log.FromContext(ctx).Error(lookupErr, "Workflow lookup failed during delete, forcing finalizer removal", "name", workflow.Name)
+				} else if existing != nil {
+					wfID = existing.ID
+				}
+			}
+
+			if wfID != "" {
+				if err := n8nClient.DeleteWorkflow(ctx, wfID); err != nil && !isN8NNotFound(err) {
+					if !shouldForceFinalize(workflow.DeletionTimestamp, err) {
+						return ctrl.Result{}, err
+					}
+					log.FromContext(ctx).Error(err, "Workflow delete failed, forcing finalizer removal", "name", workflow.Name, "workflowID", wfID)
+				}
+			}
+		}
+	}
+
+	controllerutil.RemoveFinalizer(workflow, n8nWorkflowFinalizer)
+	if err := r.Update(ctx, workflow); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
 // getN8nClient creates an n8n API client from the workflow spec
 func (r *N8nWorkflowReconciler) getN8nClient(ctx context.Context, workflow *n8nv1alpha1.N8nWorkflow) (*n8n.Client, error) {
-	// Get the API key from secret
 	apiKeySecret := &corev1.Secret{}
 	apiKeyRef := workflow.Spec.N8nInstance.APIKeySecretRef
 	namespace := apiKeyRef.Namespace
@@ -221,7 +259,6 @@ func (r *N8nWorkflowReconciler) getN8nClient(ctx context.Context, workflow *n8nv
 		return nil, fmt.Errorf("API key not found in secret at key %s", apiKeyRef.Key)
 	}
 
-	// Determine the n8n URL
 	var n8nURL string
 	if workflow.Spec.N8nInstance.URL != "" {
 		n8nURL = workflow.Spec.N8nInstance.URL
@@ -245,12 +282,10 @@ func (r *N8nWorkflowReconciler) getN8nClient(ctx context.Context, workflow *n8nv
 
 // getWorkflowJSON retrieves the workflow JSON from the configured source
 func (r *N8nWorkflowReconciler) getWorkflowJSON(ctx context.Context, workflow *n8nv1alpha1.N8nWorkflow) ([]byte, error) {
-	// Check for inline workflow first
 	if workflow.Spec.Workflow != nil {
 		return workflow.Spec.Workflow.Raw, nil
 	}
 
-	// Get from ConfigMap or Secret
 	if workflow.Spec.SourceRef == nil {
 		return nil, fmt.Errorf("either workflow or sourceRef must be specified")
 	}
@@ -291,7 +326,6 @@ func (r *N8nWorkflowReconciler) getWorkflowJSON(ctx context.Context, workflow *n
 
 // updateCredentialIDs updates credential references in the workflow to use actual n8n credential IDs
 func (r *N8nWorkflowReconciler) updateCredentialIDs(ctx context.Context, workflow *n8nv1alpha1.N8nWorkflow, workflowData map[string]interface{}) error {
-	// Get credential IDs from N8nCredential resources
 	credentialIDs := make(map[string]string)
 	for credName, credResource := range workflow.Spec.CredentialMappings {
 		cred := &n8nv1alpha1.N8nCredential{}
@@ -304,7 +338,6 @@ func (r *N8nWorkflowReconciler) updateCredentialIDs(ctx context.Context, workflo
 		credentialIDs[credName] = cred.Status.CredentialID
 	}
 
-	// Update nodes with credential references
 	nodes, ok := workflowData["nodes"].([]interface{})
 	if !ok {
 		return nil
@@ -332,7 +365,6 @@ func (r *N8nWorkflowReconciler) updateCredentialIDs(ctx context.Context, workflo
 				continue
 			}
 
-			// Check if we have a mapping for this credential
 			if newID, ok := credentialIDs[credName]; ok {
 				credRefMap["id"] = newID
 			}
@@ -357,7 +389,6 @@ func (r *N8nWorkflowReconciler) updateStatus(ctx context.Context, workflow *n8nv
 	now := metav1.Now()
 	workflow.Status.LastSyncTime = &now
 
-	// Update condition
 	condition := metav1.Condition{
 		Type:               "Ready",
 		Status:             conditionStatus,
@@ -367,7 +398,6 @@ func (r *N8nWorkflowReconciler) updateStatus(ctx context.Context, workflow *n8nv
 		Message:            message,
 	}
 
-	// Find and update or append the condition
 	found := false
 	for i, c := range workflow.Status.Conditions {
 		if c.Type == condition.Type {
@@ -385,19 +415,128 @@ func (r *N8nWorkflowReconciler) updateStatus(ctx context.Context, workflow *n8nv
 		return ctrl.Result{}, err
 	}
 
-	// Requeue on failure
 	if conditionStatus == metav1.ConditionFalse {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Requeue periodically to sync
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+func (r *N8nWorkflowReconciler) indexWorkflows(ctx context.Context, mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &n8nv1alpha1.N8nWorkflow{}, workflowSourceConfigMapField, func(obj client.Object) []string {
+		workflow := obj.(*n8nv1alpha1.N8nWorkflow)
+		if workflow.Spec.SourceRef == nil {
+			return nil
+		}
+		if workflow.Spec.SourceRef.Kind != "" && workflow.Spec.SourceRef.Kind != "ConfigMap" {
+			return nil
+		}
+		ns := workflow.Spec.SourceRef.Namespace
+		if ns == "" {
+			ns = workflow.Namespace
+		}
+		return []string{namespacedKey(ns, workflow.Spec.SourceRef.Name)}
+	}); err != nil {
+		return err
+	}
+
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &n8nv1alpha1.N8nWorkflow{}, workflowSourceSecretField, func(obj client.Object) []string {
+		workflow := obj.(*n8nv1alpha1.N8nWorkflow)
+		if workflow.Spec.SourceRef == nil || workflow.Spec.SourceRef.Kind != "Secret" {
+			return nil
+		}
+		ns := workflow.Spec.SourceRef.Namespace
+		if ns == "" {
+			ns = workflow.Namespace
+		}
+		return []string{namespacedKey(ns, workflow.Spec.SourceRef.Name)}
+	}); err != nil {
+		return err
+	}
+
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &n8nv1alpha1.N8nWorkflow{}, workflowAPIKeyField, func(obj client.Object) []string {
+		workflow := obj.(*n8nv1alpha1.N8nWorkflow)
+		ref := workflow.Spec.N8nInstance.APIKeySecretRef
+		return []string{namespacedKeyWithDefault(ref.Namespace, workflow.Namespace, ref.Name)}
+	}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *N8nWorkflowReconciler) mapConfigMapToWorkflows(ctx context.Context, obj client.Object) []reconcile.Request {
+	key := namespacedKey(obj.GetNamespace(), obj.GetName())
+	list := &n8nv1alpha1.N8nWorkflowList{}
+	if err := r.List(ctx, list, client.MatchingFields{workflowSourceConfigMapField: key}); err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		item := list.Items[i]
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: item.Name, Namespace: item.Namespace}})
+	}
+	return requests
+}
+
+func (r *N8nWorkflowReconciler) mapSecretToWorkflows(ctx context.Context, obj client.Object) []reconcile.Request {
+	key := namespacedKey(obj.GetNamespace(), obj.GetName())
+	requestSet := map[types.NamespacedName]struct{}{}
+
+	for _, field := range []string{workflowSourceSecretField, workflowAPIKeyField} {
+		list := &n8nv1alpha1.N8nWorkflowList{}
+		if err := r.List(ctx, list, client.MatchingFields{field: key}); err != nil {
+			continue
+		}
+		for i := range list.Items {
+			item := list.Items[i]
+			requestSet[types.NamespacedName{Name: item.Name, Namespace: item.Namespace}] = struct{}{}
+		}
+	}
+
+	requests := make([]reconcile.Request, 0, len(requestSet))
+	for nn := range requestSet {
+		requests = append(requests, reconcile.Request{NamespacedName: nn})
+	}
+	return requests
+}
+
+func (r *N8nWorkflowReconciler) mapCredentialToWorkflows(ctx context.Context, obj client.Object) []reconcile.Request {
+	credential, ok := obj.(*n8nv1alpha1.N8nCredential)
+	if !ok {
+		return nil
+	}
+
+	list := &n8nv1alpha1.N8nWorkflowList{}
+	if err := r.List(ctx, list, client.InNamespace(credential.Namespace)); err != nil {
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0)
+	for i := range list.Items {
+		wf := list.Items[i]
+		for _, mappedCredential := range wf.Spec.CredentialMappings {
+			if mappedCredential == credential.Name {
+				requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: wf.Name, Namespace: wf.Namespace}})
+				break
+			}
+		}
+	}
+
+	return requests
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *N8nWorkflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := r.indexWorkflows(context.Background(), mgr); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&n8nv1alpha1.N8nWorkflow{}).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.mapConfigMapToWorkflows)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapSecretToWorkflows)).
+		Watches(&n8nv1alpha1.N8nCredential{}, handler.EnqueueRequestsFromMapFunc(r.mapCredentialToWorkflows)).
 		Named("n8nworkflow").
 		Complete(r)
 }

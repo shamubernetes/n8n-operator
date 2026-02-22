@@ -18,67 +18,203 @@ package controller
 
 import (
 	"context"
+	"testing"
+	"time"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	n8nv1alpha1 "github.com/shamubernetes/n8n-operator/api/v1alpha1"
 )
 
-var _ = Describe("N8nCredential Controller", func() {
-	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+func TestBuildCredentialData_MergesMappedSecretAndStaticData(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := n8nv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add n8n scheme: %v", err)
+	}
 
-		ctx := context.Background()
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "cred-secret", Namespace: "services"},
+		Data: map[string][]byte{
+			"DB_USER":     []byte("alice"),
+			"DB_PASSWORD": []byte("s3cr3t"),
+		},
+	}
 
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+	reconciler := &N8nCredentialReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
+		Scheme: scheme,
+	}
+
+	credential := &n8nv1alpha1.N8nCredential{
+		ObjectMeta: metav1.ObjectMeta{Name: "postgres-account", Namespace: "services"},
+		Spec: n8nv1alpha1.N8nCredentialSpec{
+			CredentialName: "Postgres account",
+			CredentialType: "postgres",
+			SecretRef:      &n8nv1alpha1.SecretReference{Name: "cred-secret"},
+			FieldMappings: map[string]string{
+				"user":     "DB_USER",
+				"password": "DB_PASSWORD",
+			},
+			Data: map[string]string{
+				"host": "db.internal",
+				"port": "5432",
+			},
+		},
+	}
+
+	data, err := reconciler.buildCredentialData(context.Background(), credential)
+	if err != nil {
+		t.Fatalf("buildCredentialData failed: %v", err)
+	}
+
+	if got, want := data["host"], "db.internal"; got != want {
+		t.Fatalf("host mismatch: got %v want %v", got, want)
+	}
+	if got, want := data["port"], "5432"; got != want {
+		t.Fatalf("port mismatch: got %v want %v", got, want)
+	}
+	if got, want := data["user"], "alice"; got != want {
+		t.Fatalf("user mismatch: got %v want %v", got, want)
+	}
+	if got, want := data["password"], "s3cr3t"; got != want {
+		t.Fatalf("password mismatch: got %v want %v", got, want)
+	}
+}
+
+func TestNamespacedKeyWithDefault(t *testing.T) {
+	if got, want := namespacedKeyWithDefault("", "services", "my-secret"), "services/my-secret"; got != want {
+		t.Fatalf("key mismatch: got %s want %s", got, want)
+	}
+	if got, want := namespacedKeyWithDefault("shared", "services", "my-secret"), "shared/my-secret"; got != want {
+		t.Fatalf("key mismatch: got %s want %s", got, want)
+	}
+}
+
+func TestCredentialHandleDeletion_ForceFinalizeAfterCleanupTimeout(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := n8nv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add n8n scheme: %v", err)
+	}
+
+	apiSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n-api", Namespace: "services"},
+		Data:       map[string][]byte{"api-key": []byte("token")},
+	}
+	deletionTime := metav1.NewTime(time.Now().Add(-(cleanupFinalizerMaxRetry + time.Minute)))
+	credential := &n8nv1alpha1.N8nCredential{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "postgres-credential",
+			Namespace:         "services",
+			Finalizers:        []string{n8nCredentialFinalizer},
+			DeletionTimestamp: &deletionTime,
+		},
+		Spec: n8nv1alpha1.N8nCredentialSpec{
+			CredentialName: "Postgres account",
+			CredentialType: "postgres",
+			DeletionPolicy: n8nv1alpha1.DeletionPolicyDelete,
+			N8nInstance: n8nv1alpha1.N8nInstanceRef{
+				APIKeySecretRef: n8nv1alpha1.SecretKeyReference{
+					Name: "n8n-api",
+					Key:  "api-key",
+				},
+			},
+		},
+	}
+
+	reconciler := &N8nCredentialReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(apiSecret, credential).Build(),
+		Scheme: scheme,
+	}
+
+	if _, err := reconciler.handleDeletion(context.Background(), credential); err != nil {
+		t.Fatalf("handleDeletion returned error: %v", err)
+	}
+
+	updated := &n8nv1alpha1.N8nCredential{}
+	if err := reconciler.Get(context.Background(), namespacedName("services", "postgres-credential"), updated); err != nil {
+		if apierrors.IsNotFound(err) {
+			return
 		}
-		n8ncredential := &n8nv1alpha1.N8nCredential{}
+		t.Fatalf("get credential failed: %v", err)
+	}
+	if hasFinalizer(updated.Finalizers, n8nCredentialFinalizer) {
+		t.Fatalf("finalizer should be removed when timeout forces cleanup bypass")
+	}
+}
 
-		BeforeEach(func() {
-			By("creating the custom resource for the Kind N8nCredential")
-			err := k8sClient.Get(ctx, typeNamespacedName, n8ncredential)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &n8nv1alpha1.N8nCredential{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
-					},
-					// TODO(user): Specify other spec details if needed.
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-			}
-		})
+func TestCredentialHandleDeletion_RetriesBeforeCleanupTimeout(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := n8nv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add n8n scheme: %v", err)
+	}
 
-		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &n8nv1alpha1.N8nCredential{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
+	apiSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n-api", Namespace: "services"},
+		Data:       map[string][]byte{"api-key": []byte("token")},
+	}
+	deletionTime := metav1.NewTime(time.Now())
+	credential := &n8nv1alpha1.N8nCredential{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "postgres-credential-retry",
+			Namespace:         "services",
+			Finalizers:        []string{n8nCredentialFinalizer},
+			DeletionTimestamp: &deletionTime,
+		},
+		Spec: n8nv1alpha1.N8nCredentialSpec{
+			CredentialName: "Postgres retry",
+			CredentialType: "postgres",
+			DeletionPolicy: n8nv1alpha1.DeletionPolicyDelete,
+			N8nInstance: n8nv1alpha1.N8nInstanceRef{
+				APIKeySecretRef: n8nv1alpha1.SecretKeyReference{
+					Name: "n8n-api",
+					Key:  "api-key",
+				},
+			},
+		},
+	}
 
-			By("Cleanup the specific resource instance N8nCredential")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &N8nCredentialReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
+	reconciler := &N8nCredentialReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(apiSecret, credential).Build(),
+		Scheme: scheme,
+	}
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
-		})
-	})
-})
+	if _, err := reconciler.handleDeletion(context.Background(), credential); err == nil {
+		t.Fatalf("expected cleanup error before timeout, got nil")
+	}
+
+	updated := &n8nv1alpha1.N8nCredential{}
+	if err := reconciler.Get(context.Background(), namespacedName("services", "postgres-credential-retry"), updated); err != nil {
+		t.Fatalf("get credential failed: %v", err)
+	}
+	if !hasFinalizer(updated.Finalizers, n8nCredentialFinalizer) {
+		t.Fatalf("finalizer should remain while retries continue")
+	}
+}
+
+func namespacedName(namespace, name string) types.NamespacedName {
+	return types.NamespacedName{Namespace: namespace, Name: name}
+}
+
+func hasFinalizer(finalizers []string, target string) bool {
+	for _, finalizer := range finalizers {
+		if finalizer == target {
+			return true
+		}
+	}
+	return false
+}

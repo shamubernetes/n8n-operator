@@ -28,10 +28,20 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	n8nv1alpha1 "github.com/shamubernetes/n8n-operator/api/v1alpha1"
 	"github.com/shamubernetes/n8n-operator/pkg/n8n"
+)
+
+const (
+	n8nCredentialFinalizer = "n8n.n8n.io/credential-finalizer"
+
+	credentialSecretField = "n8ncredential.secretRef"
+	credentialAPIKeyField = "n8ncredential.apiKeySecretRef"
 )
 
 // N8nCredentialReconciler reconciles a N8nCredential object
@@ -49,7 +59,6 @@ type N8nCredentialReconciler struct {
 func (r *N8nCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Fetch the N8nCredential instance
 	credential := &n8nv1alpha1.N8nCredential{}
 	if err := r.Get(ctx, req.NamespacedName, credential); err != nil {
 		if errors.IsNotFound(err) {
@@ -60,21 +69,29 @@ func (r *N8nCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	// Get the n8n API client
+	if !credential.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, credential)
+	}
+
+	if !controllerutil.ContainsFinalizer(credential, n8nCredentialFinalizer) {
+		controllerutil.AddFinalizer(credential, n8nCredentialFinalizer)
+		if err := r.Update(ctx, credential); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	n8nClient, err := r.getN8nClient(ctx, credential)
 	if err != nil {
 		logger.Error(err, "Failed to create n8n client")
 		return r.updateStatus(ctx, credential, "", metav1.ConditionFalse, "ClientError", err.Error())
 	}
 
-	// Build the credential data from Secret + static data
 	credData, err := r.buildCredentialData(ctx, credential)
 	if err != nil {
 		logger.Error(err, "Failed to build credential data")
 		return r.updateStatus(ctx, credential, "", metav1.ConditionFalse, "DataError", err.Error())
 	}
 
-	// Check if credential exists in n8n
 	existingCred, err := n8nClient.GetCredentialByName(ctx, credential.Spec.CredentialName)
 	if err != nil {
 		logger.Error(err, "Failed to check existing credential")
@@ -83,33 +100,22 @@ func (r *N8nCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	var credID string
 	if existingCred == nil {
-		// Create new credential
 		logger.Info("Creating new credential", "name", credential.Spec.CredentialName)
-		newCred := &n8n.Credential{
-			Name: credential.Spec.CredentialName,
-			Type: credential.Spec.CredentialType,
-			Data: credData,
-		}
-		created, err := n8nClient.CreateCredential(ctx, newCred)
-		if err != nil {
-			logger.Error(err, "Failed to create credential")
-			return r.updateStatus(ctx, credential, "", metav1.ConditionFalse, "CreateError", err.Error())
+		newCred := &n8n.Credential{Name: credential.Spec.CredentialName, Type: credential.Spec.CredentialType, Data: credData}
+		created, createErr := n8nClient.CreateCredential(ctx, newCred)
+		if createErr != nil {
+			logger.Error(createErr, "Failed to create credential")
+			return r.updateStatus(ctx, credential, "", metav1.ConditionFalse, "CreateError", createErr.Error())
 		}
 		credID = created.ID
 		logger.Info("Created credential", "id", credID)
 	} else {
-		// Update existing credential
 		credID = existingCred.ID
 		logger.Info("Updating existing credential", "id", credID)
-		updateCred := &n8n.Credential{
-			Name: credential.Spec.CredentialName,
-			Type: credential.Spec.CredentialType,
-			Data: credData,
-		}
-		_, err := n8nClient.UpdateCredential(ctx, credID, updateCred)
-		if err != nil {
-			logger.Error(err, "Failed to update credential")
-			return r.updateStatus(ctx, credential, credID, metav1.ConditionFalse, "UpdateError", err.Error())
+		updateCred := &n8n.Credential{Name: credential.Spec.CredentialName, Type: credential.Spec.CredentialType, Data: credData}
+		if _, updateErr := n8nClient.UpdateCredential(ctx, credID, updateCred); updateErr != nil {
+			logger.Error(updateErr, "Failed to update credential")
+			return r.updateStatus(ctx, credential, credID, metav1.ConditionFalse, "UpdateError", updateErr.Error())
 		}
 		logger.Info("Updated credential", "id", credID)
 	}
@@ -117,9 +123,53 @@ func (r *N8nCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return r.updateStatus(ctx, credential, credID, metav1.ConditionTrue, "Synced", "Credential synced successfully")
 }
 
+func (r *N8nCredentialReconciler) handleDeletion(ctx context.Context, credential *n8nv1alpha1.N8nCredential) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(credential, n8nCredentialFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	if credential.Spec.DeletionPolicy == n8nv1alpha1.DeletionPolicyDelete {
+		n8nClient, err := r.getN8nClient(ctx, credential)
+		if err != nil {
+			if !shouldForceFinalize(credential.DeletionTimestamp, err) {
+				return ctrl.Result{}, err
+			}
+			log.FromContext(ctx).Error(err, "Credential cleanup failed, forcing finalizer removal", "name", credential.Name)
+		} else {
+			credID := credential.Status.CredentialID
+			if credID == "" {
+				existing, lookupErr := n8nClient.GetCredentialByName(ctx, credential.Spec.CredentialName)
+				if lookupErr != nil {
+					if !shouldForceFinalize(credential.DeletionTimestamp, lookupErr) {
+						return ctrl.Result{}, lookupErr
+					}
+					log.FromContext(ctx).Error(lookupErr, "Credential lookup failed during delete, forcing finalizer removal", "name", credential.Name)
+				} else if existing != nil {
+					credID = existing.ID
+				}
+			}
+
+			if credID != "" {
+				if err := n8nClient.DeleteCredential(ctx, credID); err != nil && !isN8NNotFound(err) {
+					if !shouldForceFinalize(credential.DeletionTimestamp, err) {
+						return ctrl.Result{}, err
+					}
+					log.FromContext(ctx).Error(err, "Credential delete failed, forcing finalizer removal", "name", credential.Name, "credentialID", credID)
+				}
+			}
+		}
+	}
+
+	controllerutil.RemoveFinalizer(credential, n8nCredentialFinalizer)
+	if err := r.Update(ctx, credential); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
 // getN8nClient creates an n8n API client from the credential spec
 func (r *N8nCredentialReconciler) getN8nClient(ctx context.Context, credential *n8nv1alpha1.N8nCredential) (*n8n.Client, error) {
-	// Get the API key from secret
 	apiKeySecret := &corev1.Secret{}
 	apiKeyRef := credential.Spec.N8nInstance.APIKeySecretRef
 	namespace := apiKeyRef.Namespace
@@ -136,7 +186,6 @@ func (r *N8nCredentialReconciler) getN8nClient(ctx context.Context, credential *
 		return nil, fmt.Errorf("API key not found in secret at key %s", apiKeyRef.Key)
 	}
 
-	// Determine the n8n URL
 	var n8nURL string
 	if credential.Spec.N8nInstance.URL != "" {
 		n8nURL = credential.Spec.N8nInstance.URL
@@ -162,12 +211,10 @@ func (r *N8nCredentialReconciler) getN8nClient(ctx context.Context, credential *
 func (r *N8nCredentialReconciler) buildCredentialData(ctx context.Context, credential *n8nv1alpha1.N8nCredential) (map[string]interface{}, error) {
 	data := make(map[string]interface{})
 
-	// Start with static data
 	for k, v := range credential.Spec.Data {
 		data[k] = v
 	}
 
-	// Add data from Kubernetes Secret (can be managed by External Secrets)
 	if credential.Spec.SecretRef != nil {
 		secretData, err := r.getSecretData(ctx, credential)
 		if err != nil {
@@ -198,9 +245,7 @@ func (r *N8nCredentialReconciler) getSecretData(ctx context.Context, credential 
 	fieldMappings := credential.Spec.FieldMappings
 
 	for secretKey, secretValue := range secret.Data {
-		// Check if there's a field mapping (secretKey -> credField)
 		credField := secretKey
-		// FieldMappings: credField -> secretKey, so reverse lookup
 		for cred, sec := range fieldMappings {
 			if sec == secretKey {
 				credField = cred
@@ -220,7 +265,6 @@ func (r *N8nCredentialReconciler) updateStatus(ctx context.Context, credential *
 	now := metav1.Now()
 	credential.Status.LastSyncTime = &now
 
-	// Update condition
 	condition := metav1.Condition{
 		Type:               "Ready",
 		Status:             conditionStatus,
@@ -230,7 +274,6 @@ func (r *N8nCredentialReconciler) updateStatus(ctx context.Context, credential *
 		Message:            message,
 	}
 
-	// Find and update or append the condition
 	found := false
 	for i, c := range credential.Status.Conditions {
 		if c.Type == condition.Type {
@@ -248,19 +291,77 @@ func (r *N8nCredentialReconciler) updateStatus(ctx context.Context, credential *
 		return ctrl.Result{}, err
 	}
 
-	// Requeue on failure
 	if conditionStatus == metav1.ConditionFalse {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Requeue periodically to sync
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+func (r *N8nCredentialReconciler) indexCredentials(ctx context.Context, mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &n8nv1alpha1.N8nCredential{}, credentialSecretField, func(obj client.Object) []string {
+		credential := obj.(*n8nv1alpha1.N8nCredential)
+		if credential.Spec.SecretRef == nil {
+			return nil
+		}
+		return []string{namespacedKeyWithDefault(credential.Spec.SecretRef.Namespace, credential.Namespace, credential.Spec.SecretRef.Name)}
+	}); err != nil {
+		return err
+	}
+
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &n8nv1alpha1.N8nCredential{}, credentialAPIKeyField, func(obj client.Object) []string {
+		credential := obj.(*n8nv1alpha1.N8nCredential)
+		ref := credential.Spec.N8nInstance.APIKeySecretRef
+		return []string{namespacedKeyWithDefault(ref.Namespace, credential.Namespace, ref.Name)}
+	}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *N8nCredentialReconciler) mapSecretToCredentials(ctx context.Context, obj client.Object) []reconcile.Request {
+	secretKey := namespacedKey(obj.GetNamespace(), obj.GetName())
+	requestSet := map[types.NamespacedName]struct{}{}
+
+	for _, field := range []string{credentialSecretField, credentialAPIKeyField} {
+		list := &n8nv1alpha1.N8nCredentialList{}
+		if err := r.List(ctx, list, client.MatchingFields{field: secretKey}); err != nil {
+			continue
+		}
+		for i := range list.Items {
+			item := list.Items[i]
+			requestSet[types.NamespacedName{Name: item.Name, Namespace: item.Namespace}] = struct{}{}
+		}
+	}
+
+	requests := make([]reconcile.Request, 0, len(requestSet))
+	for nn := range requestSet {
+		requests = append(requests, reconcile.Request{NamespacedName: nn})
+	}
+	return requests
+}
+
+func namespacedKey(namespace, name string) string {
+	return fmt.Sprintf("%s/%s", namespace, name)
+}
+
+func namespacedKeyWithDefault(namespace, defaultNamespace, name string) string {
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+	return namespacedKey(namespace, name)
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *N8nCredentialReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := r.indexCredentials(context.Background(), mgr); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&n8nv1alpha1.N8nCredential{}).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapSecretToCredentials)).
 		Named("n8ncredential").
 		Complete(r)
 }

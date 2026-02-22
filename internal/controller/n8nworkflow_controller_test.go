@@ -18,67 +18,187 @@ package controller
 
 import (
 	"context"
+	"testing"
+	"time"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	n8nv1alpha1 "github.com/shamubernetes/n8n-operator/api/v1alpha1"
 )
 
-var _ = Describe("N8nWorkflow Controller", func() {
-	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+func TestGetWorkflowJSON_FromConfigMap(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := n8nv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add n8n scheme: %v", err)
+	}
 
-		ctx := context.Background()
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "workflow-cm", Namespace: "services"},
+		Data: map[string]string{
+			"flow.json": `{"nodes":[],"connections":{}}`,
+		},
+	}
 
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+	reconciler := &N8nWorkflowReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build(),
+		Scheme: scheme,
+	}
+
+	workflow := &n8nv1alpha1.N8nWorkflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "wf", Namespace: "services"},
+		Spec: n8nv1alpha1.N8nWorkflowSpec{
+			SourceRef: &n8nv1alpha1.WorkflowSourceRef{
+				Kind: "ConfigMap",
+				Name: "workflow-cm",
+				Key:  "flow.json",
+			},
+		},
+	}
+
+	payload, err := reconciler.getWorkflowJSON(context.Background(), workflow)
+	if err != nil {
+		t.Fatalf("getWorkflowJSON failed: %v", err)
+	}
+
+	if got, want := string(payload), `{"nodes":[],"connections":{}}`; got != want {
+		t.Fatalf("workflow payload mismatch: got %s want %s", got, want)
+	}
+}
+
+func TestBuildWorkflowPayload(t *testing.T) {
+	workflowData := map[string]interface{}{
+		"nodes": []interface{}{
+			map[string]interface{}{"name": "Trigger", "type": "n8n-nodes-base.scheduleTrigger"},
+		},
+		"connections": map[string]interface{}{"Trigger": map[string]interface{}{}},
+		"settings":    map[string]interface{}{"executionOrder": "v1"},
+	}
+
+	wf := buildWorkflowPayload("Nightly sync", workflowData)
+
+	if wf.Name != "Nightly sync" {
+		t.Fatalf("name mismatch: %s", wf.Name)
+	}
+	if len(wf.Nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(wf.Nodes))
+	}
+	if _, ok := wf.Connections["Trigger"]; !ok {
+		t.Fatalf("missing Trigger connection")
+	}
+	if got, ok := wf.Settings["executionOrder"]; !ok || got != "v1" {
+		t.Fatalf("unexpected settings: %+v", wf.Settings)
+	}
+}
+
+func TestWorkflowHandleDeletion_ForceFinalizeAfterCleanupTimeout(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := n8nv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add n8n scheme: %v", err)
+	}
+
+	apiSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n-api", Namespace: "services"},
+		Data:       map[string][]byte{"api-key": []byte("token")},
+	}
+	deletionTime := metav1.NewTime(time.Now().Add(-(cleanupFinalizerMaxRetry + time.Minute)))
+	workflow := &n8nv1alpha1.N8nWorkflow{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "workflow-cleanup",
+			Namespace:         "services",
+			Finalizers:        []string{n8nWorkflowFinalizer},
+			DeletionTimestamp: &deletionTime,
+		},
+		Spec: n8nv1alpha1.N8nWorkflowSpec{
+			WorkflowName:   "Nightly sync",
+			DeletionPolicy: n8nv1alpha1.DeletionPolicyDelete,
+			N8nInstance: n8nv1alpha1.N8nInstanceRef{
+				APIKeySecretRef: n8nv1alpha1.SecretKeyReference{
+					Name: "n8n-api",
+					Key:  "api-key",
+				},
+			},
+		},
+	}
+
+	reconciler := &N8nWorkflowReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(apiSecret, workflow).Build(),
+		Scheme: scheme,
+	}
+
+	if _, err := reconciler.handleDeletion(context.Background(), workflow); err != nil {
+		t.Fatalf("handleDeletion returned error: %v", err)
+	}
+
+	updated := &n8nv1alpha1.N8nWorkflow{}
+	if err := reconciler.Get(context.Background(), namespacedName("services", "workflow-cleanup"), updated); err != nil {
+		if apierrors.IsNotFound(err) {
+			return
 		}
-		n8nworkflow := &n8nv1alpha1.N8nWorkflow{}
+		t.Fatalf("get workflow failed: %v", err)
+	}
+	if hasFinalizer(updated.Finalizers, n8nWorkflowFinalizer) {
+		t.Fatalf("finalizer should be removed when timeout forces cleanup bypass")
+	}
+}
 
-		BeforeEach(func() {
-			By("creating the custom resource for the Kind N8nWorkflow")
-			err := k8sClient.Get(ctx, typeNamespacedName, n8nworkflow)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &n8nv1alpha1.N8nWorkflow{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
-					},
-					// TODO(user): Specify other spec details if needed.
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-			}
-		})
+func TestWorkflowHandleDeletion_RetriesBeforeCleanupTimeout(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := n8nv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add n8n scheme: %v", err)
+	}
 
-		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &n8nv1alpha1.N8nWorkflow{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
+	apiSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n-api", Namespace: "services"},
+		Data:       map[string][]byte{"api-key": []byte("token")},
+	}
+	deletionTime := metav1.NewTime(time.Now())
+	workflow := &n8nv1alpha1.N8nWorkflow{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "workflow-cleanup-retry",
+			Namespace:         "services",
+			Finalizers:        []string{n8nWorkflowFinalizer},
+			DeletionTimestamp: &deletionTime,
+		},
+		Spec: n8nv1alpha1.N8nWorkflowSpec{
+			WorkflowName:   "Nightly retry",
+			DeletionPolicy: n8nv1alpha1.DeletionPolicyDelete,
+			N8nInstance: n8nv1alpha1.N8nInstanceRef{
+				APIKeySecretRef: n8nv1alpha1.SecretKeyReference{
+					Name: "n8n-api",
+					Key:  "api-key",
+				},
+			},
+		},
+	}
 
-			By("Cleanup the specific resource instance N8nWorkflow")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &N8nWorkflowReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
+	reconciler := &N8nWorkflowReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(apiSecret, workflow).Build(),
+		Scheme: scheme,
+	}
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
-		})
-	})
-})
+	if _, err := reconciler.handleDeletion(context.Background(), workflow); err == nil {
+		t.Fatalf("expected cleanup error before timeout, got nil")
+	}
+
+	updated := &n8nv1alpha1.N8nWorkflow{}
+	if err := reconciler.Get(context.Background(), namespacedName("services", "workflow-cleanup-retry"), updated); err != nil {
+		t.Fatalf("get workflow failed: %v", err)
+	}
+	if !hasFinalizer(updated.Finalizers, n8nWorkflowFinalizer) {
+		t.Fatalf("finalizer should remain while retries continue")
+	}
+}

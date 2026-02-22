@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -36,7 +38,7 @@ type Client struct {
 // NewClient creates a new n8n API client
 func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -132,17 +134,29 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 
 // ListCredentials lists all credentials
 func (c *Client) ListCredentials(ctx context.Context) ([]Credential, error) {
-	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/credentials", nil)
-	if err != nil {
-		return nil, err
+	allCredentials := make([]Credential, 0)
+	cursor := ""
+
+	for {
+		path := withCursor("/api/v1/credentials?limit=250", cursor)
+		respBody, err := c.doRequest(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		var list CredentialList
+		if err := json.Unmarshal(respBody, &list); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal credentials: %w", err)
+		}
+
+		allCredentials = append(allCredentials, list.Data...)
+		if list.NextCursor == "" {
+			break
+		}
+		cursor = list.NextCursor
 	}
 
-	var list CredentialList
-	if err := json.Unmarshal(respBody, &list); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal credentials: %w", err)
-	}
-
-	return list.Data, nil
+	return allCredentials, nil
 }
 
 // GetCredentialByName finds a credential by name
@@ -199,17 +213,29 @@ func (c *Client) DeleteCredential(ctx context.Context, id string) error {
 
 // ListWorkflows lists all workflows
 func (c *Client) ListWorkflows(ctx context.Context) ([]Workflow, error) {
-	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/workflows", nil)
-	if err != nil {
-		return nil, err
+	allWorkflows := make([]Workflow, 0)
+	cursor := ""
+
+	for {
+		path := withCursor("/api/v1/workflows?limit=250", cursor)
+		respBody, err := c.doRequest(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		var list WorkflowList
+		if err := json.Unmarshal(respBody, &list); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal workflows: %w", err)
+		}
+
+		allWorkflows = append(allWorkflows, list.Data...)
+		if list.NextCursor == "" {
+			break
+		}
+		cursor = list.NextCursor
 	}
 
-	var list WorkflowList
-	if err := json.Unmarshal(respBody, &list); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal workflows: %w", err)
-	}
-
-	return list.Data, nil
+	return allWorkflows, nil
 }
 
 // GetWorkflow gets a workflow by ID
@@ -307,4 +333,17 @@ func (c *Client) DeactivateWorkflow(ctx context.Context, id string) (*Workflow, 
 	}
 
 	return &wf, nil
+}
+
+func withCursor(path, cursor string) string {
+	if cursor == "" {
+		return path
+	}
+
+	values := url.Values{}
+	values.Set("cursor", cursor)
+	if strings.Contains(path, "?") {
+		return path + "&" + values.Encode()
+	}
+	return path + "?" + values.Encode()
 }
