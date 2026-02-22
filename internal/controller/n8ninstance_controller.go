@@ -492,13 +492,15 @@ func (r *N8nInstanceReconciler) buildDeployment(ctx context.Context, instance *n
 	volumes, volumeMounts := r.buildVolumes(instance, component)
 
 	container := corev1.Container{
-		Name:            "n8n",
-		Image:           instance.Spec.Image,
-		ImagePullPolicy: instance.Spec.ImagePullPolicy,
-		Env:             env,
-		EnvFrom:         instance.Spec.ExtraEnvFrom,
-		VolumeMounts:    volumeMounts,
-		Resources:       instance.Spec.Resources,
+		Name:                     "n8n",
+		Image:                    instance.Spec.Image,
+		ImagePullPolicy:          instance.Spec.ImagePullPolicy,
+		Env:                      env,
+		EnvFrom:                  instance.Spec.ExtraEnvFrom,
+		VolumeMounts:             volumeMounts,
+		Resources:                instance.Spec.Resources,
+		TerminationMessagePath:   "/dev/termination-log",
+		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 	}
 
 	if component == n8nComponentMain {
@@ -560,14 +562,18 @@ func (r *N8nInstanceReconciler) buildDeployment(ctx context.Context, instance *n
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: podLabels, Annotations: podAnnotations},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: instance.Spec.ServiceAccountName,
-					InitContainers:     instance.Spec.InitContainers,
-					Containers:         containers,
-					Volumes:            volumes,
-					NodeSelector:       instance.Spec.NodeSelector,
-					Tolerations:        instance.Spec.Tolerations,
-					Affinity:           instance.Spec.Affinity,
-					ImagePullSecrets:   instance.Spec.ImagePullSecrets,
+					ServiceAccountName:            instance.Spec.ServiceAccountName,
+					InitContainers:                instance.Spec.InitContainers,
+					Containers:                    containers,
+					Volumes:                       volumes,
+					NodeSelector:                  instance.Spec.NodeSelector,
+					Tolerations:                   instance.Spec.Tolerations,
+					Affinity:                      instance.Spec.Affinity,
+					ImagePullSecrets:              instance.Spec.ImagePullSecrets,
+					RestartPolicy:                 corev1.RestartPolicyAlways,
+					TerminationGracePeriodSeconds: ptr(int64(30)),
+					DNSPolicy:                     corev1.DNSClusterFirst,
+					SchedulerName:                 "default-scheduler",
 				},
 			},
 		},
@@ -1246,6 +1252,10 @@ func (r *N8nInstanceReconciler) updateStatusFromDeployments(ctx context.Context,
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }
 
 // SetupWithManager sets up the controller with the Manager.
