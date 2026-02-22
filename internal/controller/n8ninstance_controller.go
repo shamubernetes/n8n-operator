@@ -570,8 +570,15 @@ func (r *N8nInstanceReconciler) buildDeployment(ctx context.Context, instance *n
 		},
 	}
 
+	// Set PodSecurityContext - n8n runs as user 1000 (node)
 	if instance.Spec.PodSecurityContext != nil {
 		deploy.Spec.Template.Spec.SecurityContext = instance.Spec.PodSecurityContext
+	} else {
+		// Default security context for n8n
+		fsGroup := int64(1000)
+		deploy.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
+			FSGroup: &fsGroup,
+		}
 	}
 
 	return deploy, nil
@@ -723,7 +730,12 @@ func (r *N8nInstanceReconciler) buildEnvVars(ctx context.Context, instance *n8nv
 		if exec.PruneData != nil && *exec.PruneData {
 			env = append(env, corev1.EnvVar{Name: "EXECUTIONS_DATA_PRUNE", Value: "true"})
 			if exec.PruneDataMaxAge != "" {
-				env = append(env, corev1.EnvVar{Name: "EXECUTIONS_DATA_MAX_AGE", Value: exec.PruneDataMaxAge})
+				// Parse duration string and convert to hours for n8n
+				maxAgeHours := exec.PruneDataMaxAge
+				if d, err := time.ParseDuration(exec.PruneDataMaxAge); err == nil {
+					maxAgeHours = fmt.Sprintf("%d", int(d.Hours()))
+				}
+				env = append(env, corev1.EnvVar{Name: "EXECUTIONS_DATA_MAX_AGE", Value: maxAgeHours})
 			}
 			if exec.PruneDataMaxCount != nil {
 				env = append(env, corev1.EnvVar{Name: "EXECUTIONS_DATA_MAX_COUNT", Value: fmt.Sprintf("%d", *exec.PruneDataMaxCount)})
