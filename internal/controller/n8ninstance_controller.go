@@ -450,9 +450,12 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 		return false, err
 	}
 
+	// Compare only the fields we manage to avoid fighting with API server defaults
 	needsUpdate := !apiequality.Semantic.DeepEqual(deploy.Labels, desiredDeploy.Labels) ||
 		!apiequality.Semantic.DeepEqual(deploy.Annotations, desiredDeploy.Annotations) ||
-		!apiequality.Semantic.DeepEqual(deploy.Spec, desiredDeploy.Spec)
+		!apiequality.Semantic.DeepEqual(deploy.Spec.Replicas, desiredDeploy.Spec.Replicas) ||
+		!apiequality.Semantic.DeepEqual(deploy.Spec.Selector, desiredDeploy.Spec.Selector) ||
+		!apiequality.Semantic.DeepEqual(deploy.Spec.Template, desiredDeploy.Spec.Template)
 
 	if needsUpdate {
 		deploy.Labels = desiredDeploy.Labels
