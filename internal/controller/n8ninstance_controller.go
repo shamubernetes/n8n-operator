@@ -461,6 +461,7 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 	// Update container specs but preserve server defaults
 	if len(currentCopy.Spec.Template.Spec.Containers) > 0 && len(desiredDeploy.Spec.Template.Spec.Containers) > 0 {
 		currentCopy.Spec.Template.Spec.Containers[0].Image = desiredDeploy.Spec.Template.Spec.Containers[0].Image
+		currentCopy.Spec.Template.Spec.Containers[0].ImagePullPolicy = desiredDeploy.Spec.Template.Spec.Containers[0].ImagePullPolicy
 		currentCopy.Spec.Template.Spec.Containers[0].Env = desiredDeploy.Spec.Template.Spec.Containers[0].Env
 		currentCopy.Spec.Template.Spec.Containers[0].EnvFrom = desiredDeploy.Spec.Template.Spec.Containers[0].EnvFrom
 		currentCopy.Spec.Template.Spec.Containers[0].Ports = desiredDeploy.Spec.Template.Spec.Containers[0].Ports
@@ -468,6 +469,7 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 		currentCopy.Spec.Template.Spec.Containers[0].VolumeMounts = desiredDeploy.Spec.Template.Spec.Containers[0].VolumeMounts
 		currentCopy.Spec.Template.Spec.Containers[0].LivenessProbe = desiredDeploy.Spec.Template.Spec.Containers[0].LivenessProbe
 		currentCopy.Spec.Template.Spec.Containers[0].ReadinessProbe = desiredDeploy.Spec.Template.Spec.Containers[0].ReadinessProbe
+		currentCopy.Spec.Template.Spec.Containers[0].StartupProbe = desiredDeploy.Spec.Template.Spec.Containers[0].StartupProbe
 		currentCopy.Spec.Template.Spec.Containers[0].SecurityContext = desiredDeploy.Spec.Template.Spec.Containers[0].SecurityContext
 	}
 	currentCopy.Spec.Template.Spec.Volumes = desiredDeploy.Spec.Template.Spec.Volumes
@@ -488,6 +490,7 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 		deploy.Spec.Template.Annotations = desiredDeploy.Spec.Template.Annotations
 		if len(deploy.Spec.Template.Spec.Containers) > 0 && len(desiredDeploy.Spec.Template.Spec.Containers) > 0 {
 			deploy.Spec.Template.Spec.Containers[0].Image = desiredDeploy.Spec.Template.Spec.Containers[0].Image
+			deploy.Spec.Template.Spec.Containers[0].ImagePullPolicy = desiredDeploy.Spec.Template.Spec.Containers[0].ImagePullPolicy
 			deploy.Spec.Template.Spec.Containers[0].Env = desiredDeploy.Spec.Template.Spec.Containers[0].Env
 			deploy.Spec.Template.Spec.Containers[0].EnvFrom = desiredDeploy.Spec.Template.Spec.Containers[0].EnvFrom
 			deploy.Spec.Template.Spec.Containers[0].Ports = desiredDeploy.Spec.Template.Spec.Containers[0].Ports
@@ -495,6 +498,7 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 			deploy.Spec.Template.Spec.Containers[0].VolumeMounts = desiredDeploy.Spec.Template.Spec.Containers[0].VolumeMounts
 			deploy.Spec.Template.Spec.Containers[0].LivenessProbe = desiredDeploy.Spec.Template.Spec.Containers[0].LivenessProbe
 			deploy.Spec.Template.Spec.Containers[0].ReadinessProbe = desiredDeploy.Spec.Template.Spec.Containers[0].ReadinessProbe
+			deploy.Spec.Template.Spec.Containers[0].StartupProbe = desiredDeploy.Spec.Template.Spec.Containers[0].StartupProbe
 			deploy.Spec.Template.Spec.Containers[0].SecurityContext = desiredDeploy.Spec.Template.Spec.Containers[0].SecurityContext
 		}
 		deploy.Spec.Template.Spec.Volumes = desiredDeploy.Spec.Template.Spec.Volumes
@@ -887,27 +891,31 @@ func (r *N8nInstanceReconciler) buildVolumes(instance *n8nv1alpha1.N8nInstance, 
 }
 
 func (r *N8nInstanceReconciler) configureProbes(container *corev1.Container, instance *n8nv1alpha1.N8nInstance) {
+	// Set all fields including API server defaults (Scheme, SuccessThreshold) to prevent reconcile loops
 	container.LivenessProbe = &corev1.Probe{
-		ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(5678)}},
+		ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(5678), Scheme: corev1.URISchemeHTTP}},
 		InitialDelaySeconds: 30,
 		PeriodSeconds:       10,
 		TimeoutSeconds:      5,
+		SuccessThreshold:    1,
 		FailureThreshold:    6,
 	}
 
 	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(5678)}},
+		ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(5678), Scheme: corev1.URISchemeHTTP}},
 		InitialDelaySeconds: 5,
 		PeriodSeconds:       5,
 		TimeoutSeconds:      5,
+		SuccessThreshold:    1,
 		FailureThreshold:    3,
 	}
 
 	container.StartupProbe = &corev1.Probe{
-		ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(5678)}},
+		ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(5678), Scheme: corev1.URISchemeHTTP}},
 		InitialDelaySeconds: 10,
 		PeriodSeconds:       10,
 		TimeoutSeconds:      5,
+		SuccessThreshold:    1,
 		FailureThreshold:    30,
 	}
 
