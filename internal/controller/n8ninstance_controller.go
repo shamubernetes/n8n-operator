@@ -24,6 +24,7 @@ import (
 
 	promv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -48,7 +49,70 @@ const (
 
 	n8nComponentMain   = "main"
 	n8nComponentWorker = "worker"
+
+	defaultOwnerSetupJobImage = "curlimages/curl:8.12.1"
+	defaultOwnerSetupEndpoint = "rest"
+	defaultOwnerSetupJobTTL   = int32(3600)
+
+	readyConditionType      = "Ready"
+	ownerSetupConditionType = "OwnerSetupReady"
 )
+
+const ownerSetupJobScript = `
+set -eu
+
+json_escape() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+base_url="${N8N_BASE_URL%/}"
+rest_endpoint="${N8N_REST_ENDPOINT#/}"
+rest_endpoint="${rest_endpoint%/}"
+
+setup_url="${base_url}/${rest_endpoint}/owner/setup"
+health_url="${base_url}/healthz"
+
+echo "Waiting for n8n to be ready at ${health_url}"
+i=0
+while [ "${i}" -lt 120 ]; do
+	if curl -fsS "${health_url}" >/dev/null 2>&1; then
+		break
+	fi
+	i=$((i + 1))
+	sleep 2
+done
+
+if ! curl -fsS "${health_url}" >/dev/null 2>&1; then
+	echo "Could not reach n8n health endpoint"
+	exit 1
+fi
+
+email="$(json_escape "${OWNER_EMAIL}")"
+first_name="$(json_escape "${OWNER_FIRST_NAME}")"
+last_name="$(json_escape "${OWNER_LAST_NAME}")"
+password="$(json_escape "${OWNER_PASSWORD}")"
+payload="{\"email\":\"${email}\",\"firstName\":\"${first_name}\",\"lastName\":\"${last_name}\",\"password\":\"${password}\"}"
+
+status_code="$(curl -sS -o /tmp/owner-setup-response -w '%{http_code}' \
+	-H 'Content-Type: application/json' \
+	-X POST \
+	--data "${payload}" \
+	"${setup_url}" || true)"
+
+if [ "${status_code}" = "200" ]; then
+	echo "Owner setup completed"
+	exit 0
+fi
+
+if [ "${status_code}" = "400" ] && grep -qi "already setup" /tmp/owner-setup-response; then
+	echo "Owner already set up"
+	exit 0
+fi
+
+echo "Owner setup request failed with status ${status_code}"
+cat /tmp/owner-setup-response || true
+exit 1
+`
 
 // N8nInstanceReconciler reconciles a N8nInstance object
 type N8nInstanceReconciler struct {
@@ -62,6 +126,7 @@ type N8nInstanceReconciler struct {
 // +kubebuilder:rbac:groups=n8n.n8n.io,resources=n8ninstances/finalizers,verbs=update
 // +kubebuilder:rbac:groups=n8n.n8n.io,resources=n8ninstances/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
@@ -171,6 +236,24 @@ func (r *N8nInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
+	if r.ownerSetupEnabled(instance) {
+		if instance.Spec.OwnerSetup.SecretRef == nil || instance.Spec.OwnerSetup.SecretRef.Name == "" {
+			err := fmt.Errorf("ownerSetup.secretRef.name is required when owner setup is enabled")
+			logger.Error(err, "Failed to reconcile owner setup")
+			return r.updateStatus(ctx, instance, "Failed", err.Error())
+		}
+		if err := r.reconcileOwnerSetupJob(ctx, instance); err != nil {
+			logger.Error(err, "Failed to reconcile owner setup Job")
+			r.Recorder.Event(instance, corev1.EventTypeWarning, "OwnerSetupFailed", err.Error())
+			return r.updateStatus(ctx, instance, "Failed", err.Error())
+		}
+	} else {
+		if err := r.deleteOwnerSetupJobIfExists(ctx, instance); err != nil {
+			logger.Error(err, "Failed to delete owner setup Job")
+			return r.updateStatus(ctx, instance, "Failed", err.Error())
+		}
+	}
+
 	return r.updateStatusFromDeployments(ctx, instance)
 }
 
@@ -221,6 +304,18 @@ func (r *N8nInstanceReconciler) setDefaults(instance *n8nv1alpha1.N8nInstance) {
 	if instance.Spec.GenericTimezone == nil {
 		instance.Spec.GenericTimezone = boolPtr(true)
 	}
+	if instance.Spec.OwnerSetup != nil {
+		if instance.Spec.OwnerSetup.RestEndpoint == "" {
+			instance.Spec.OwnerSetup.RestEndpoint = defaultOwnerSetupEndpoint
+		}
+		if instance.Spec.OwnerSetup.JobImage == "" {
+			instance.Spec.OwnerSetup.JobImage = defaultOwnerSetupJobImage
+		}
+		if instance.Spec.OwnerSetup.JobTTLSecondsAfterFinished == nil {
+			ttl := defaultOwnerSetupJobTTL
+			instance.Spec.OwnerSetup.JobTTLSecondsAfterFinished = &ttl
+		}
+	}
 }
 
 func (r *N8nInstanceReconciler) queueEnabled(instance *n8nv1alpha1.N8nInstance) bool {
@@ -262,6 +357,135 @@ func (r *N8nInstanceReconciler) desiredWorkerReplicas(instance *n8nv1alpha1.N8nI
 
 func workerDeploymentName(instance *n8nv1alpha1.N8nInstance) string {
 	return fmt.Sprintf("%s-worker", instance.Name)
+}
+
+func ownerSetupJobName(instance *n8nv1alpha1.N8nInstance) string {
+	name := fmt.Sprintf("%s-owner-setup", instance.Name)
+	if len(name) <= 63 {
+		return name
+	}
+
+	base := instance.Name
+	maxBaseLen := 63 - len("-owner-setup")
+	if maxBaseLen <= 0 {
+		return "owner-setup"
+	}
+	if len(base) > maxBaseLen {
+		base = base[:maxBaseLen]
+		base = strings.TrimSuffix(base, "-")
+	}
+	if base == "" {
+		return "owner-setup"
+	}
+	return fmt.Sprintf("%s-owner-setup", base)
+}
+
+func (r *N8nInstanceReconciler) ownerSetupEnabled(instance *n8nv1alpha1.N8nInstance) bool {
+	if instance.Spec.OwnerSetup == nil {
+		return false
+	}
+	if instance.Spec.OwnerSetup.Enabled != nil {
+		return *instance.Spec.OwnerSetup.Enabled
+	}
+	return instance.Spec.OwnerSetup.SecretRef != nil
+}
+
+func (r *N8nInstanceReconciler) reconcileOwnerSetupJob(ctx context.Context, instance *n8nv1alpha1.N8nInstance) error {
+	logger := log.FromContext(ctx)
+	name := ownerSetupJobName(instance)
+
+	job := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, job)
+	if errors.IsNotFound(err) {
+		desired := r.buildOwnerSetupJob(instance)
+		if err := controllerutil.SetControllerReference(instance, desired, r.Scheme); err != nil {
+			return err
+		}
+		logger.Info("Creating owner setup Job", "name", desired.Name)
+		r.Recorder.Event(instance, corev1.EventTypeNormal, "OwnerSetupJobCreated", fmt.Sprintf("Created owner setup Job %s", desired.Name))
+		return r.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+
+	if job.Status.Succeeded > 0 {
+		return nil
+	}
+
+	if job.Status.Failed > 0 && job.Spec.BackoffLimit != nil && job.Status.Failed >= *job.Spec.BackoffLimit {
+		return fmt.Errorf("owner setup job %s failed; fix the owner setup secret and delete the job to retry", job.Name)
+	}
+
+	return nil
+}
+
+func (r *N8nInstanceReconciler) deleteOwnerSetupJobIfExists(ctx context.Context, instance *n8nv1alpha1.N8nInstance) error {
+	job := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Name: ownerSetupJobName(instance), Namespace: instance.Namespace}, job)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return r.Delete(ctx, job)
+}
+
+func (r *N8nInstanceReconciler) buildOwnerSetupJob(instance *n8nv1alpha1.N8nInstance) *batchv1.Job {
+	serviceName := instance.Name
+	if instance.Spec.OwnerSetup.ServiceName != "" {
+		serviceName = instance.Spec.OwnerSetup.ServiceName
+	}
+
+	port := int32(5678)
+	if instance.Spec.Service != nil && instance.Spec.Service.Port != 0 {
+		port = instance.Spec.Service.Port
+	}
+
+	ttlSecondsAfterFinished := defaultOwnerSetupJobTTL
+	if instance.Spec.OwnerSetup.JobTTLSecondsAfterFinished != nil {
+		ttlSecondsAfterFinished = *instance.Spec.OwnerSetup.JobTTLSecondsAfterFinished
+	}
+
+	backoffLimit := int32(6)
+	baseURL := fmt.Sprintf("http://%s.%s.svc:%d", serviceName, instance.Namespace, port)
+	secretName := instance.Spec.OwnerSetup.SecretRef.Name
+
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ownerSetupJobName(instance),
+			Namespace: instance.Namespace,
+			Labels:    r.buildLabels(instance, "owner-setup"),
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:            &backoffLimit,
+			TTLSecondsAfterFinished: &ttlSecondsAfterFinished,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: r.buildSelectorLabels(instance, "owner-setup"),
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy:    corev1.RestartPolicyOnFailure,
+					ImagePullSecrets: instance.Spec.ImagePullSecrets,
+					Containers: []corev1.Container{{
+						Name:            "owner-setup",
+						Image:           instance.Spec.OwnerSetup.JobImage,
+						ImagePullPolicy: corev1.PullIfNotPresent,
+						Command:         []string{"/bin/sh", "-c", ownerSetupJobScript},
+						Env: []corev1.EnvVar{
+							{Name: "N8N_BASE_URL", Value: baseURL},
+							{Name: "N8N_REST_ENDPOINT", Value: instance.Spec.OwnerSetup.RestEndpoint},
+							secretEnvVar("OWNER_EMAIL", secretName, "email", false),
+							secretEnvVar("OWNER_FIRST_NAME", secretName, "firstName", false),
+							secretEnvVar("OWNER_LAST_NAME", secretName, "lastName", false),
+							secretEnvVar("OWNER_PASSWORD", secretName, "password", false),
+						},
+					}},
+				},
+			},
+		},
+	}
 }
 
 func (r *N8nInstanceReconciler) reconcilePVC(ctx context.Context, instance *n8nv1alpha1.N8nInstance) error {
@@ -1323,8 +1547,10 @@ func (r *N8nInstanceReconciler) updateStatusFields(
 	instance.Status.Phase = phase
 	instance.Status.ObservedGeneration = instance.Generation
 
+	r.syncOwnerSetupCondition(ctx, instance)
+
 	condition := metav1.Condition{
-		Type:               "Ready",
+		Type:               readyConditionType,
 		Status:             metav1.ConditionFalse,
 		ObservedGeneration: instance.Generation,
 		Reason:             phase,
@@ -1344,6 +1570,75 @@ func (r *N8nInstanceReconciler) updateStatusFields(
 	}
 
 	return result, nil
+}
+
+func (r *N8nInstanceReconciler) syncOwnerSetupCondition(ctx context.Context, instance *n8nv1alpha1.N8nInstance) {
+	if !r.ownerSetupEnabled(instance) {
+		removeStatusCondition(&instance.Status.Conditions, ownerSetupConditionType)
+		return
+	}
+
+	if instance.Spec.OwnerSetup == nil || instance.Spec.OwnerSetup.SecretRef == nil || instance.Spec.OwnerSetup.SecretRef.Name == "" {
+		apimeta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+			Type:               ownerSetupConditionType,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: instance.Generation,
+			Reason:             "InvalidSpec",
+			Message:            "ownerSetup.secretRef.name is required when owner setup is enabled",
+		})
+		return
+	}
+
+	if r.Client == nil {
+		return
+	}
+
+	condition := metav1.Condition{
+		Type:               ownerSetupConditionType,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: instance.Generation,
+		Reason:             "Pending",
+		Message:            "Waiting for owner setup Job",
+	}
+
+	job := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Name: ownerSetupJobName(instance), Namespace: instance.Namespace}, job)
+	switch {
+	case errors.IsNotFound(err):
+		condition.Reason = "Pending"
+		condition.Message = "Waiting for owner setup Job to be created"
+	case err != nil:
+		condition.Reason = "Unknown"
+		condition.Message = fmt.Sprintf("Could not read owner setup Job: %v", err)
+	case job.Status.Succeeded > 0:
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = "Succeeded"
+		condition.Message = "Owner setup Job completed successfully"
+	case job.Status.Failed > 0 && job.Spec.BackoffLimit != nil && job.Status.Failed >= *job.Spec.BackoffLimit:
+		condition.Reason = "Failed"
+		condition.Message = "Owner setup Job failed"
+	default:
+		condition.Reason = "Progressing"
+		condition.Message = "Owner setup Job is running"
+	}
+
+	apimeta.SetStatusCondition(&instance.Status.Conditions, condition)
+}
+
+func removeStatusCondition(conditions *[]metav1.Condition, conditionType string) {
+	if len(*conditions) == 0 {
+		return
+	}
+
+	filtered := (*conditions)[:0]
+	for i := range *conditions {
+		if (*conditions)[i].Type == conditionType {
+			continue
+		}
+		filtered = append(filtered, (*conditions)[i])
+	}
+
+	*conditions = filtered
 }
 
 func (r *N8nInstanceReconciler) updateStatusFromDeployments(ctx context.Context, instance *n8nv1alpha1.N8nInstance) (ctrl.Result, error) {
@@ -1412,6 +1707,7 @@ func (r *N8nInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&n8nv1alpha1.N8nInstance{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&batchv1.Job{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&networkingv1.Ingress{}).

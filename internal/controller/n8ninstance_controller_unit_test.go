@@ -18,13 +18,17 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	n8nv1alpha1 "github.com/shamubernetes/n8n-operator/api/v1alpha1"
 )
@@ -212,6 +216,163 @@ func TestUpdateStatusFields_NoStatusWriteWhenUnchanged(t *testing.T) {
 	}
 }
 
+func TestOwnerSetupEnabled(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{}
+	reconciler := &N8nInstanceReconciler{}
+
+	if reconciler.ownerSetupEnabled(instance) {
+		t.Fatalf("owner setup should be disabled when config is missing")
+	}
+
+	instance.Spec.OwnerSetup = &n8nv1alpha1.OwnerSetupConfig{
+		SecretRef: &n8nv1alpha1.SecretReference{Name: "owner-secret"},
+	}
+	if !reconciler.ownerSetupEnabled(instance) {
+		t.Fatalf("owner setup should be enabled when secretRef is configured")
+	}
+
+	instance.Spec.OwnerSetup.Enabled = boolPtr(false)
+	if reconciler.ownerSetupEnabled(instance) {
+		t.Fatalf("owner setup should be disabled when enabled=false")
+	}
+}
+
+func TestBuildOwnerSetupJob_Defaults(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+		Spec: n8nv1alpha1.N8nInstanceSpec{
+			Database: n8nv1alpha1.DatabaseConfig{Type: "postgresdb"},
+			OwnerSetup: &n8nv1alpha1.OwnerSetupConfig{
+				SecretRef: &n8nv1alpha1.SecretReference{Name: "n8n-owner"},
+			},
+		},
+	}
+
+	reconciler := &N8nInstanceReconciler{}
+	reconciler.setDefaults(instance)
+	job := reconciler.buildOwnerSetupJob(instance)
+
+	if got, want := job.Name, "n8n-owner-setup"; got != want {
+		t.Fatalf("job name mismatch: got %q want %q", got, want)
+	}
+	if job.Spec.TTLSecondsAfterFinished == nil || *job.Spec.TTLSecondsAfterFinished != 3600 {
+		t.Fatalf("unexpected job TTL: %+v", job.Spec.TTLSecondsAfterFinished)
+	}
+	if len(job.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("expected one container, got %d", len(job.Spec.Template.Spec.Containers))
+	}
+
+	container := job.Spec.Template.Spec.Containers[0]
+	if got, want := container.Image, "curlimages/curl:8.12.1"; got != want {
+		t.Fatalf("job image mismatch: got %q want %q", got, want)
+	}
+
+	assertHasEnvValue(t, container.Env, "N8N_BASE_URL", "http://n8n.services.svc:5678")
+	assertHasEnvValue(t, container.Env, "N8N_REST_ENDPOINT", "rest")
+	assertEnvSecretKey(t, container.Env, "OWNER_EMAIL", "n8n-owner", "email")
+	assertEnvSecretKey(t, container.Env, "OWNER_FIRST_NAME", "n8n-owner", "firstName")
+	assertEnvSecretKey(t, container.Env, "OWNER_LAST_NAME", "n8n-owner", "lastName")
+	assertEnvSecretKey(t, container.Env, "OWNER_PASSWORD", "n8n-owner", "password")
+}
+
+func TestOwnerSetupJobName_TruncatesLongNames(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "n8n-instance-name-that-is-way-too-long-for-a-kubernetes-job-name-limit-check",
+		},
+	}
+
+	got := ownerSetupJobName(instance)
+	if len(got) > 63 {
+		t.Fatalf("owner setup job name exceeded 63 chars: %d (%q)", len(got), got)
+	}
+	if !strings.HasSuffix(got, "-owner-setup") {
+		t.Fatalf("owner setup job name must end with -owner-setup, got %q", got)
+	}
+}
+
+func TestSyncOwnerSetupCondition_Succeeded(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := n8nv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to register n8n scheme: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to register batch scheme: %v", err)
+	}
+
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "n8n",
+			Namespace:  "services",
+			Generation: 4,
+		},
+		Spec: n8nv1alpha1.N8nInstanceSpec{
+			OwnerSetup: &n8nv1alpha1.OwnerSetupConfig{
+				SecretRef: &n8nv1alpha1.SecretReference{Name: "n8n-owner"},
+			},
+		},
+	}
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ownerSetupJobName(instance),
+			Namespace: instance.Namespace,
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: int32Ptr(6),
+		},
+		Status: batchv1.JobStatus{
+			Succeeded: 1,
+		},
+	}
+
+	reconciler := &N8nInstanceReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(job).Build(),
+	}
+
+	reconciler.syncOwnerSetupCondition(context.Background(), instance)
+
+	condition := apimeta.FindStatusCondition(instance.Status.Conditions, ownerSetupConditionType)
+	if condition == nil {
+		t.Fatalf("missing %s condition", ownerSetupConditionType)
+	}
+	if condition.Status != metav1.ConditionTrue {
+		t.Fatalf("unexpected condition status: got %s want %s", condition.Status, metav1.ConditionTrue)
+	}
+	if got, want := condition.Reason, "Succeeded"; got != want {
+		t.Fatalf("unexpected condition reason: got %q want %q", got, want)
+	}
+	if got, want := condition.ObservedGeneration, int64(4); got != want {
+		t.Fatalf("unexpected observed generation: got %d want %d", got, want)
+	}
+}
+
+func TestSyncOwnerSetupCondition_RemovedWhenDisabled(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "n8n",
+			Namespace:  "services",
+			Generation: 2,
+		},
+		Status: n8nv1alpha1.N8nInstanceStatus{
+			Conditions: []metav1.Condition{{
+				Type:               ownerSetupConditionType,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 1,
+				Reason:             "Succeeded",
+				Message:            "Owner setup Job completed successfully",
+			}},
+		},
+	}
+
+	reconciler := &N8nInstanceReconciler{}
+	reconciler.syncOwnerSetupCondition(context.Background(), instance)
+
+	if apimeta.FindStatusCondition(instance.Status.Conditions, ownerSetupConditionType) != nil {
+		t.Fatalf("expected %s condition to be removed when owner setup is disabled", ownerSetupConditionType)
+	}
+}
+
 func assertHasEnv(t *testing.T, env []corev1.EnvVar, name string) {
 	t.Helper()
 	if !hasEnv(env, name) {
@@ -239,6 +400,27 @@ func hasEnv(env []corev1.EnvVar, name string) bool {
 		}
 	}
 	return false
+}
+
+func assertEnvSecretKey(t *testing.T, env []corev1.EnvVar, envName, secretName, key string) {
+	t.Helper()
+	for i := range env {
+		if env[i].Name != envName {
+			continue
+		}
+		if env[i].ValueFrom == nil || env[i].ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("env %s is not sourced from secret key", envName)
+		}
+		ref := env[i].ValueFrom.SecretKeyRef
+		if ref.Name != secretName || ref.Key != key {
+			t.Fatalf("env %s secret ref mismatch: got %s/%s want %s/%s", envName, ref.Name, ref.Key, secretName, key)
+		}
+		if ref.Optional == nil || *ref.Optional {
+			t.Fatalf("env %s secret ref should be required", envName)
+		}
+		return
+	}
+	t.Fatalf("missing env %s", envName)
 }
 
 func hasVolume(volumes []corev1.Volume, name string) bool {
