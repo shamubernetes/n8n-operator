@@ -1,0 +1,170 @@
+# Example: Basic n8n deployment with PostgreSQL
+apiVersion: n8n.n8n.io/v1alpha1
+kind: N8nInstance
+metadata:
+  name: n8n
+  namespace: services
+spec:
+  replicas: 1
+  image: docker.n8n.io/n8nio/n8n:latest
+
+  # Database (required)
+  database:
+    type: postgresdb
+    secretRef:
+      name: n8n-postgres  # Should contain: host, port, database, user, password
+
+  # Encryption key for credentials (recommended)
+  encryption:
+    keySecretRef:
+      name: n8n-encryption
+      key: key
+
+  # Resource limits
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  # Persistence (optional, for community nodes / local files)
+  persistence:
+    enabled: true
+    size: 1Gi
+
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 5678
+
+  # Ingress (optional)
+  ingress:
+    enabled: true
+    className: nginx
+    host: n8n.example.com
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    tls:
+      - hosts:
+          - n8n.example.com
+        secretName: n8n-tls
+---
+# Example: Production HA setup with queue mode
+apiVersion: n8n.n8n.io/v1alpha1
+kind: N8nInstance
+metadata:
+  name: n8n-ha
+  namespace: services
+spec:
+  replicas: 3
+  image: docker.n8n.io/n8nio/n8n:1.70.0
+
+  database:
+    type: postgresdb
+    secretRef:
+      name: n8n-postgres
+    ssl: true
+
+  # Enable queue mode for horizontal scaling
+  queue:
+    enabled: true
+    redis:
+      secretRef:
+        name: n8n-redis  # Should contain: host, port, password
+
+  encryption:
+    keySecretRef:
+      name: n8n-encryption
+      key: key
+
+  # Webhook URL (required for production)
+  webhook:
+    url: https://n8n.example.com
+
+  # Execution settings
+  executions:
+    mode: queue
+    timeout: 3600
+    saveDataOnError: all
+    saveDataOnSuccess: all
+    pruneData: true
+    pruneDataMaxAge: "168h"  # 7 days
+
+  # Logging
+  logging:
+    level: info
+    output: console
+
+  # Metrics for Prometheus
+  metrics:
+    enabled: true
+    port: 5679
+    includeWorkflowIdLabel: true
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+
+  # Resources for HA
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+  # Health checks
+  healthCheck:
+    livenessProbe:
+      initialDelaySeconds: 60
+      periodSeconds: 30
+    readinessProbe:
+      initialDelaySeconds: 10
+      periodSeconds: 10
+
+  # Pod scheduling
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: n8n
+                app.kubernetes.io/instance: n8n-ha
+            topologyKey: kubernetes.io/hostname
+
+  ingress:
+    enabled: true
+    className: nginx
+    host: n8n.example.com
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    tls:
+      - hosts:
+          - n8n.example.com
+        secretName: n8n-tls
+---
+# Example: Minimal SQLite deployment (development only)
+apiVersion: n8n.n8n.io/v1alpha1
+kind: N8nInstance
+metadata:
+  name: n8n-dev
+  namespace: default
+spec:
+  replicas: 1
+  image: docker.n8n.io/n8nio/n8n:latest
+
+  database:
+    type: sqlite
+
+  persistence:
+    enabled: true
+    size: 5Gi
+
+  service:
+    type: ClusterIP
+    port: 5678

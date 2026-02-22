@@ -14,9 +14,47 @@ rules:
   - list
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - monitoring.coreos.com
+  resources:
+  - servicemonitors
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - n8n.n8n.io
   resources:
   - n8ncredentials
+  - n8ninstances
   - n8nworkflows
   verbs:
   - create
@@ -30,6 +68,7 @@ rules:
   - n8n.n8n.io
   resources:
   - n8ncredentials/finalizers
+  - n8ninstances/finalizers
   - n8nworkflows/finalizers
   verbs:
   - update
@@ -37,8 +76,22 @@ rules:
   - n8n.n8n.io
   resources:
   - n8ncredentials/status
+  - n8ninstances/scale
+  - n8ninstances/status
   - n8nworkflows/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

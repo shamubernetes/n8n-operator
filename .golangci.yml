@@ -1,22 +1,16 @@
 run:
   timeout: 5m
-  allow-parallel-runners: true
+  go: "1.23"
 
 linters:
   disable-all: true
   enable:
     - errcheck
+    - gosimple
     - govet
     - ineffassign
     - staticcheck
     - unused
-
-linters-settings:
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment
-      - shadow
 
 issues:
   exclude-use-default: false
