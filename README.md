@@ -17,6 +17,7 @@ The n8n-operator provides a complete solution for running n8n in Kubernetes:
 - 📊 **Queue Mode Support**: Horizontal scaling with Redis
 - 💾 **Database Support**: PostgreSQL, MySQL, MariaDB, SQLite
 - 🔐 **Encryption**: Automatic credential encryption key management
+- 🪪 **Enterprise License Support**: Activate n8n with a license key Secret
 - 📈 **Metrics**: Prometheus metrics with ServiceMonitor
 - 🌐 **Ingress**: Automatic Ingress creation with TLS
 
@@ -96,6 +97,11 @@ spec:
     keySecretRef:
       name: n8n-encryption
       key: key
+
+  license:
+    activationKeySecretRef:
+      name: n8n-license # Key: activationKey (same namespace as N8nInstance)
+      key: activationKey
 
   ownerSetup:
     secretRef:
@@ -180,6 +186,7 @@ spec:
 | `database` | DatabaseConfig | Database configuration (required) |
 | `queue` | QueueConfig | Queue mode with Redis |
 | `encryption` | EncryptionConfig | Encryption key for credentials |
+| `license` | LicenseConfig | Enterprise license activation key (same-namespace Secret) |
 | `ownerSetup` | OwnerSetupConfig | One-time owner bootstrap Job |
 | `webhook` | WebhookConfig | Webhook URL settings |
 | `smtp` | SMTPConfig | Email configuration |

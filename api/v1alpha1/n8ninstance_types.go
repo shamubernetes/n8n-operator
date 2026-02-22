@@ -57,6 +57,10 @@ type N8nInstanceSpec struct {
 	// +optional
 	Encryption *EncryptionConfig `json:"encryption,omitempty"`
 
+	// License configures n8n enterprise license activation.
+	// +optional
+	License *LicenseConfig `json:"license,omitempty"`
+
 	// Webhook configures webhook settings.
 	// +optional
 	Webhook *WebhookConfig `json:"webhook,omitempty"`
@@ -288,6 +292,23 @@ type EncryptionConfig struct {
 	// Expected key: key (32+ character random string).
 	// +optional
 	KeySecretRef *SecretKeyReference `json:"keySecretRef,omitempty"`
+}
+
+// LicenseConfig configures enterprise license activation.
+type LicenseConfig struct {
+	// ActivationKeySecretRef references a Secret containing the n8n license activation key.
+	// The secret must be in the same namespace as the N8nInstance.
+	// This maps to the N8N_LICENSE_ACTIVATION_KEY environment variable.
+	// +optional
+	ActivationKeySecretRef *LocalSecretKeyReference `json:"activationKeySecretRef,omitempty"`
+}
+
+// LocalSecretKeyReference references a key in a Secret in the same namespace.
+type LocalSecretKeyReference struct {
+	// Name of the Secret.
+	Name string `json:"name"`
+	// Key in the Secret.
+	Key string `json:"key"`
 }
 
 // WebhookConfig configures webhook settings.

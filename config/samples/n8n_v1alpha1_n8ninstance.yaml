@@ -20,6 +20,12 @@ spec:
       name: n8n-encryption
       key: key
 
+  # Enterprise license key (optional)
+  license:
+    activationKeySecretRef:
+      name: n8n-license # Secret must be in the same namespace as this N8nInstance
+      key: activationKey
+
   # One-time owner bootstrap (optional)
   ownerSetup:
     secretRef:

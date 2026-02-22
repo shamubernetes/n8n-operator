@@ -85,6 +85,12 @@ func TestBuildEnvVars_WiresAdvancedSettings(t *testing.T) {
 				Enabled:                       boolPtr(true),
 				IncludeMessageEventBusMetrics: boolPtr(true),
 			},
+			License: &n8nv1alpha1.LicenseConfig{
+				ActivationKeySecretRef: &n8nv1alpha1.LocalSecretKeyReference{
+					Name: "n8n-license",
+					Key:  "activationKey",
+				},
+			},
 			Resources: corev1.ResourceRequirements{},
 		},
 	}
@@ -103,6 +109,7 @@ func TestBuildEnvVars_WiresAdvancedSettings(t *testing.T) {
 	assertHasEnvValue(t, env, "QUEUE_HEALTH_CHECK_ACTIVE", "true")
 	assertHasEnvValue(t, env, "N8N_METRICS_INCLUDE_MESSAGE_EVENT_BUS_METRICS", "true")
 	assertHasEnvValue(t, env, "TZ", "Europe/Berlin")
+	assertEnvSecretKey(t, env, "N8N_LICENSE_ACTIVATION_KEY", "n8n-license", "activationKey")
 
 	if hasEnv(env, "GENERIC_TIMEZONE") {
 		t.Fatalf("GENERIC_TIMEZONE should not be set when genericTimezone=false")

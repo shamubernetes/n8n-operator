@@ -4968,6 +4968,26 @@ spec:
                   - name
                   type: object
                 type: array
+              license:
+                description: License configures n8n enterprise license activation.
+                properties:
+                  activationKeySecretRef:
+                    description: |-
+                      ActivationKeySecretRef references a Secret containing the n8n license activation key.
+                      The secret must be in the same namespace as the N8nInstance.
+                      This maps to the N8N_LICENSE_ACTIVATION_KEY environment variable.
+                    properties:
+                      key:
+                        description: Key in the Secret.
+                        type: string
+                      name:
+                        description: Name of the Secret.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                type: object
               logging:
                 description: Logging configures logging settings.
                 properties:

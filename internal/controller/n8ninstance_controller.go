@@ -1040,6 +1040,17 @@ func (r *N8nInstanceReconciler) buildEnvVars(ctx context.Context, instance *n8nv
 		}})
 	}
 
+	if instance.Spec.License != nil && instance.Spec.License.ActivationKeySecretRef != nil {
+		licenseKeyRef := instance.Spec.License.ActivationKeySecretRef
+		env = append(env, corev1.EnvVar{Name: "N8N_LICENSE_ACTIVATION_KEY", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: licenseKeyRef.Name},
+				Key:                  licenseKeyRef.Key,
+				Optional:             boolPtr(false),
+			},
+		}})
+	}
+
 	if instance.Spec.Webhook != nil {
 		if instance.Spec.Webhook.URL != "" {
 			env = append(env, corev1.EnvVar{Name: "WEBHOOK_URL", Value: instance.Spec.Webhook.URL})
