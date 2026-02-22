@@ -193,8 +193,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.N8nInstanceReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("n8ninstance-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "N8nInstance")
 		os.Exit(1)

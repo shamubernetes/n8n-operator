@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -38,10 +40,19 @@ import (
 	n8nv1alpha1 "github.com/shamubernetes/n8n-operator/api/v1alpha1"
 )
 
+const (
+	// Finalizer for cleanup
+	n8nFinalizer = "n8n.n8n.io/finalizer"
+
+	// Annotations
+	annotationConfigHash = "n8n.n8n.io/config-hash"
+)
+
 // N8nInstanceReconciler reconciles a N8nInstance object
 type N8nInstanceReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=n8n.n8n.io,resources=n8ninstances,verbs=get;list;watch;create;update;patch;delete
@@ -52,6 +63,7 @@ type N8nInstanceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 
@@ -70,6 +82,20 @@ func (r *N8nInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// Handle deletion
+	if !instance.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, instance)
+	}
+
+	// Add finalizer if not present
+	if !controllerutil.ContainsFinalizer(instance, n8nFinalizer) {
+		controllerutil.AddFinalizer(instance, n8nFinalizer)
+		if err := r.Update(ctx, instance); err != nil {
+			return ctrl.Result{}, err
+		}
+		r.Recorder.Event(instance, corev1.EventTypeNormal, "Finalizer", "Added finalizer")
+	}
+
 	// Set defaults
 	r.setDefaults(instance)
 
@@ -77,6 +103,7 @@ func (r *N8nInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if instance.Spec.Persistence != nil && (instance.Spec.Persistence.Enabled == nil || *instance.Spec.Persistence.Enabled) {
 		if err := r.reconcilePVC(ctx, instance); err != nil {
 			logger.Error(err, "Failed to reconcile PVC")
+			r.Recorder.Event(instance, corev1.EventTypeWarning, "PVCFailed", err.Error())
 			return r.updateStatus(ctx, instance, "Failed", err.Error())
 		}
 	}
@@ -84,25 +111,71 @@ func (r *N8nInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Reconcile Service
 	if err := r.reconcileService(ctx, instance); err != nil {
 		logger.Error(err, "Failed to reconcile Service")
+		r.Recorder.Event(instance, corev1.EventTypeWarning, "ServiceFailed", err.Error())
 		return r.updateStatus(ctx, instance, "Failed", err.Error())
 	}
 
 	// Reconcile Deployment
-	if err := r.reconcileDeployment(ctx, instance); err != nil {
+	deploymentUpdated, err := r.reconcileDeployment(ctx, instance)
+	if err != nil {
 		logger.Error(err, "Failed to reconcile Deployment")
+		r.Recorder.Event(instance, corev1.EventTypeWarning, "DeploymentFailed", err.Error())
 		return r.updateStatus(ctx, instance, "Failed", err.Error())
 	}
+	if deploymentUpdated {
+		r.Recorder.Event(instance, corev1.EventTypeNormal, "DeploymentUpdated", "Deployment configuration updated")
+	}
 
-	// Reconcile Ingress if enabled
+	// Reconcile Ingress
 	if instance.Spec.Ingress != nil && instance.Spec.Ingress.Enabled != nil && *instance.Spec.Ingress.Enabled {
 		if err := r.reconcileIngress(ctx, instance); err != nil {
 			logger.Error(err, "Failed to reconcile Ingress")
+			r.Recorder.Event(instance, corev1.EventTypeWarning, "IngressFailed", err.Error())
 			return r.updateStatus(ctx, instance, "Failed", err.Error())
+		}
+	} else {
+		// Delete Ingress if disabled
+		if err := r.deleteIngressIfExists(ctx, instance); err != nil {
+			logger.Error(err, "Failed to delete Ingress")
 		}
 	}
 
-	// Update status
+	// Update status from deployment
 	return r.updateStatusFromDeployment(ctx, instance)
+}
+
+// handleDeletion handles cleanup when the resource is being deleted
+func (r *N8nInstanceReconciler) handleDeletion(ctx context.Context, instance *n8nv1alpha1.N8nInstance) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if controllerutil.ContainsFinalizer(instance, n8nFinalizer) {
+		logger.Info("Performing cleanup for N8nInstance", "name", instance.Name)
+		r.Recorder.Event(instance, corev1.EventTypeNormal, "Deleting", "Cleaning up resources")
+
+		// Cleanup is handled by owner references, but we can add custom cleanup here
+		// For example, cleanup external resources, send notifications, etc.
+
+		// Remove finalizer
+		controllerutil.RemoveFinalizer(instance, n8nFinalizer)
+		if err := r.Update(ctx, instance); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// deleteIngressIfExists deletes the Ingress if it exists
+func (r *N8nInstanceReconciler) deleteIngressIfExists(ctx context.Context, instance *n8nv1alpha1.N8nInstance) error {
+	ingress := &networkingv1.Ingress{}
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, ingress)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return r.Delete(ctx, ingress)
 }
 
 func (r *N8nInstanceReconciler) setDefaults(instance *n8nv1alpha1.N8nInstance) {
@@ -115,6 +188,9 @@ func (r *N8nInstanceReconciler) setDefaults(instance *n8nv1alpha1.N8nInstance) {
 	}
 	if instance.Spec.ImagePullPolicy == "" {
 		instance.Spec.ImagePullPolicy = corev1.PullIfNotPresent
+	}
+	if instance.Spec.Timezone == "" {
+		instance.Spec.Timezone = "UTC"
 	}
 }
 
@@ -138,6 +214,7 @@ func (r *N8nInstanceReconciler) reconcilePVC(ctx context.Context, instance *n8nv
 			return err
 		}
 		logger.Info("Creating PVC", "name", pvcName)
+		r.Recorder.Event(instance, corev1.EventTypeNormal, "PVCCreated", fmt.Sprintf("Created PVC %s", pvcName))
 		return r.Create(ctx, pvc)
 	}
 
@@ -192,19 +269,27 @@ func (r *N8nInstanceReconciler) reconcileService(ctx context.Context, instance *
 
 	if errors.IsNotFound(err) {
 		logger.Info("Creating Service", "name", instance.Name)
+		r.Recorder.Event(instance, corev1.EventTypeNormal, "ServiceCreated", fmt.Sprintf("Created Service %s", instance.Name))
 		return r.Create(ctx, desiredSvc)
 	} else if err != nil {
 		return err
 	}
 
-	// Update Service
-	svc.Spec.Ports = desiredSvc.Spec.Ports
-	svc.Spec.Type = desiredSvc.Spec.Type
-	svc.Spec.Selector = desiredSvc.Spec.Selector
-	if instance.Spec.Service != nil && instance.Spec.Service.Annotations != nil {
-		svc.Annotations = instance.Spec.Service.Annotations
+	// Check if update needed
+	if !reflect.DeepEqual(svc.Spec.Ports, desiredSvc.Spec.Ports) ||
+		svc.Spec.Type != desiredSvc.Spec.Type ||
+		!reflect.DeepEqual(svc.Spec.Selector, desiredSvc.Spec.Selector) {
+		svc.Spec.Ports = desiredSvc.Spec.Ports
+		svc.Spec.Type = desiredSvc.Spec.Type
+		svc.Spec.Selector = desiredSvc.Spec.Selector
+		if instance.Spec.Service != nil && instance.Spec.Service.Annotations != nil {
+			svc.Annotations = instance.Spec.Service.Annotations
+		}
+		logger.Info("Updating Service", "name", instance.Name)
+		return r.Update(ctx, svc)
 	}
-	return r.Update(ctx, svc)
+
+	return nil
 }
 
 func (r *N8nInstanceReconciler) buildService(instance *n8nv1alpha1.N8nInstance) *corev1.Service {
@@ -272,7 +357,7 @@ func (r *N8nInstanceReconciler) buildService(instance *n8nv1alpha1.N8nInstance) 
 	return svc
 }
 
-func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instance *n8nv1alpha1.N8nInstance) error {
+func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instance *n8nv1alpha1.N8nInstance) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	deploy := &appsv1.Deployment{}
@@ -280,22 +365,55 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 
 	desiredDeploy, err2 := r.buildDeployment(ctx, instance)
 	if err2 != nil {
-		return err2
+		return false, err2
 	}
 	if err3 := controllerutil.SetControllerReference(instance, desiredDeploy, r.Scheme); err3 != nil {
-		return err3
+		return false, err3
 	}
 
 	if errors.IsNotFound(err) {
 		logger.Info("Creating Deployment", "name", instance.Name)
-		return r.Create(ctx, desiredDeploy)
+		r.Recorder.Event(instance, corev1.EventTypeNormal, "DeploymentCreated", fmt.Sprintf("Created Deployment %s", instance.Name))
+		return true, r.Create(ctx, desiredDeploy)
 	} else if err != nil {
-		return err
+		return false, err
 	}
 
-	// Update Deployment
-	deploy.Spec = desiredDeploy.Spec
-	return r.Update(ctx, deploy)
+	// Check if update needed
+	needsUpdate := false
+
+	// Check replicas
+	if deploy.Spec.Replicas == nil || *deploy.Spec.Replicas != *desiredDeploy.Spec.Replicas {
+		needsUpdate = true
+	}
+
+	// Check image
+	if len(deploy.Spec.Template.Spec.Containers) > 0 && len(desiredDeploy.Spec.Template.Spec.Containers) > 0 {
+		if deploy.Spec.Template.Spec.Containers[0].Image != desiredDeploy.Spec.Template.Spec.Containers[0].Image {
+			needsUpdate = true
+			r.Recorder.Event(instance, corev1.EventTypeNormal, "ImageUpdated",
+				fmt.Sprintf("Updating image from %s to %s",
+					deploy.Spec.Template.Spec.Containers[0].Image,
+					desiredDeploy.Spec.Template.Spec.Containers[0].Image))
+		}
+	}
+
+	// Check if spec changed (simplified - in production you'd want more granular checks)
+	if !reflect.DeepEqual(deploy.Spec.Template.Spec.Containers[0].Env, desiredDeploy.Spec.Template.Spec.Containers[0].Env) {
+		needsUpdate = true
+	}
+
+	if !reflect.DeepEqual(deploy.Spec.Template.Spec.Containers[0].Resources, desiredDeploy.Spec.Template.Spec.Containers[0].Resources) {
+		needsUpdate = true
+	}
+
+	if needsUpdate {
+		deploy.Spec = desiredDeploy.Spec
+		logger.Info("Updating Deployment", "name", instance.Name)
+		return true, r.Update(ctx, deploy)
+	}
+
+	return false, nil
 }
 
 func (r *N8nInstanceReconciler) buildDeployment(ctx context.Context, instance *n8nv1alpha1.N8nInstance) (*appsv1.Deployment, error) {
@@ -375,6 +493,13 @@ func (r *N8nInstanceReconciler) buildDeployment(ctx context.Context, instance *n
 			Selector: &metav1.LabelSelector{
 				MatchLabels: selectorLabels,
 			},
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+					MaxSurge:       &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+				},
+			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      podLabels,
@@ -413,7 +538,6 @@ func (r *N8nInstanceReconciler) buildEnvVars(ctx context.Context, instance *n8nv
 	env = append(env, corev1.EnvVar{Name: "DB_TYPE", Value: db.Type})
 
 	if db.SecretRef != nil {
-		// Note: SecretKeyRef uses LocalObjectReference which is namespace-local
 		env = append(env,
 			corev1.EnvVar{Name: "DB_POSTGRESDB_HOST", ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
@@ -493,6 +617,15 @@ func (r *N8nInstanceReconciler) buildEnvVars(ctx context.Context, instance *n8nv
 				}},
 			)
 		}
+
+		if instance.Spec.Queue.BullMQ != nil {
+			if instance.Spec.Queue.BullMQ.Prefix != "" {
+				env = append(env, corev1.EnvVar{Name: "QUEUE_BULL_PREFIX", Value: instance.Spec.Queue.BullMQ.Prefix})
+			}
+			if instance.Spec.Queue.BullMQ.GracefulShutdownTimeout != nil {
+				env = append(env, corev1.EnvVar{Name: "QUEUE_BULL_GRACEFUL_SHUTDOWN_TIMEOUT", Value: fmt.Sprintf("%d", *instance.Spec.Queue.BullMQ.GracefulShutdownTimeout)})
+			}
+		}
 	}
 
 	// Encryption key
@@ -514,11 +647,65 @@ func (r *N8nInstanceReconciler) buildEnvVars(ctx context.Context, instance *n8nv
 		if instance.Spec.Webhook.TunnelEnabled != nil && *instance.Spec.Webhook.TunnelEnabled {
 			env = append(env, corev1.EnvVar{Name: "N8N_TUNNEL_ENABLED", Value: "true"})
 		}
+		if instance.Spec.Webhook.Path != "" {
+			env = append(env, corev1.EnvVar{Name: "N8N_PATH", Value: instance.Spec.Webhook.Path})
+		}
+	}
+
+	// SMTP settings
+	if instance.Spec.SMTP != nil && instance.Spec.SMTP.Enabled != nil && *instance.Spec.SMTP.Enabled {
+		env = append(env, corev1.EnvVar{Name: "N8N_EMAIL_MODE", Value: "smtp"})
+		if instance.Spec.SMTP.SecretRef != nil {
+			smtpSecret := instance.Spec.SMTP.SecretRef.Name
+			env = append(env,
+				corev1.EnvVar{Name: "N8N_SMTP_HOST", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: smtpSecret},
+						Key:                  "host",
+						Optional:             boolPtr(true),
+					},
+				}},
+				corev1.EnvVar{Name: "N8N_SMTP_PORT", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: smtpSecret},
+						Key:                  "port",
+						Optional:             boolPtr(true),
+					},
+				}},
+				corev1.EnvVar{Name: "N8N_SMTP_USER", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: smtpSecret},
+						Key:                  "user",
+						Optional:             boolPtr(true),
+					},
+				}},
+				corev1.EnvVar{Name: "N8N_SMTP_PASS", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: smtpSecret},
+						Key:                  "password",
+						Optional:             boolPtr(true),
+					},
+				}},
+				corev1.EnvVar{Name: "N8N_SMTP_SENDER", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: smtpSecret},
+						Key:                  "sender",
+						Optional:             boolPtr(true),
+					},
+				}},
+			)
+		}
+		if instance.Spec.SMTP.SSL != nil && *instance.Spec.SMTP.SSL {
+			env = append(env, corev1.EnvVar{Name: "N8N_SMTP_SSL", Value: "true"})
+		}
 	}
 
 	// Executions settings
 	if instance.Spec.Executions != nil {
 		exec := instance.Spec.Executions
+		if exec.Mode != "" {
+			env = append(env, corev1.EnvVar{Name: "EXECUTIONS_MODE", Value: exec.Mode})
+		}
 		if exec.Timeout != nil {
 			env = append(env, corev1.EnvVar{Name: "EXECUTIONS_TIMEOUT", Value: fmt.Sprintf("%d", *exec.Timeout)})
 		}
@@ -531,10 +718,16 @@ func (r *N8nInstanceReconciler) buildEnvVars(ctx context.Context, instance *n8nv
 		if exec.SaveDataOnSuccess != "" {
 			env = append(env, corev1.EnvVar{Name: "EXECUTIONS_DATA_SAVE_ON_SUCCESS", Value: exec.SaveDataOnSuccess})
 		}
+		if exec.SaveManualExecutions != nil {
+			env = append(env, corev1.EnvVar{Name: "EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS", Value: fmt.Sprintf("%t", *exec.SaveManualExecutions)})
+		}
 		if exec.PruneData != nil && *exec.PruneData {
 			env = append(env, corev1.EnvVar{Name: "EXECUTIONS_DATA_PRUNE", Value: "true"})
 			if exec.PruneDataMaxAge != "" {
 				env = append(env, corev1.EnvVar{Name: "EXECUTIONS_DATA_MAX_AGE", Value: exec.PruneDataMaxAge})
+			}
+			if exec.PruneDataMaxCount != nil {
+				env = append(env, corev1.EnvVar{Name: "EXECUTIONS_DATA_MAX_COUNT", Value: fmt.Sprintf("%d", *exec.PruneDataMaxCount)})
 			}
 		}
 	}
@@ -558,6 +751,20 @@ func (r *N8nInstanceReconciler) buildEnvVars(ctx context.Context, instance *n8nv
 		if instance.Spec.Metrics.IncludeWorkflowIdLabel != nil && *instance.Spec.Metrics.IncludeWorkflowIdLabel {
 			env = append(env, corev1.EnvVar{Name: "N8N_METRICS_INCLUDE_WORKFLOW_ID_LABEL", Value: "true"})
 		}
+		if instance.Spec.Metrics.IncludeNodeTypeLabel != nil && *instance.Spec.Metrics.IncludeNodeTypeLabel {
+			env = append(env, corev1.EnvVar{Name: "N8N_METRICS_INCLUDE_NODE_TYPE_LABEL", Value: "true"})
+		}
+		if instance.Spec.Metrics.IncludeCredentialTypeLabel != nil && *instance.Spec.Metrics.IncludeCredentialTypeLabel {
+			env = append(env, corev1.EnvVar{Name: "N8N_METRICS_INCLUDE_CREDENTIAL_TYPE_LABEL", Value: "true"})
+		}
+		if instance.Spec.Metrics.IncludeApiEndpoints != nil && *instance.Spec.Metrics.IncludeApiEndpoints {
+			env = append(env, corev1.EnvVar{Name: "N8N_METRICS_INCLUDE_API_ENDPOINTS", Value: "true"})
+		}
+	}
+
+	// External hooks
+	if instance.Spec.ExternalHooks != nil && instance.Spec.ExternalHooks.Files != "" {
+		env = append(env, corev1.EnvVar{Name: "EXTERNAL_HOOK_FILES", Value: instance.Spec.ExternalHooks.Files})
 	}
 
 	// Add extra env vars
@@ -627,6 +834,20 @@ func (r *N8nInstanceReconciler) configureProbes(container *corev1.Container, ins
 		FailureThreshold:    3,
 	}
 
+	// Default startup probe for slow starts
+	container.StartupProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/healthz",
+				Port: intstr.FromInt32(5678),
+			},
+		},
+		InitialDelaySeconds: 10,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      5,
+		FailureThreshold:    30, // Allow up to 5 minutes for startup
+	}
+
 	// Override with custom settings
 	if instance.Spec.HealthCheck != nil {
 		if instance.Spec.HealthCheck.LivenessProbe != nil {
@@ -641,6 +862,13 @@ func (r *N8nInstanceReconciler) configureProbes(container *corev1.Container, ins
 				container.ReadinessProbe = nil
 			} else {
 				r.applyProbeConfig(container.ReadinessProbe, instance.Spec.HealthCheck.ReadinessProbe)
+			}
+		}
+		if instance.Spec.HealthCheck.StartupProbe != nil {
+			if instance.Spec.HealthCheck.StartupProbe.Enabled != nil && !*instance.Spec.HealthCheck.StartupProbe.Enabled {
+				container.StartupProbe = nil
+			} else {
+				r.applyProbeConfig(container.StartupProbe, instance.Spec.HealthCheck.StartupProbe)
 			}
 		}
 	}
@@ -677,15 +905,22 @@ func (r *N8nInstanceReconciler) reconcileIngress(ctx context.Context, instance *
 
 	if errors.IsNotFound(err) {
 		logger.Info("Creating Ingress", "name", instance.Name)
+		r.Recorder.Event(instance, corev1.EventTypeNormal, "IngressCreated", fmt.Sprintf("Created Ingress %s", instance.Name))
 		return r.Create(ctx, desiredIngress)
 	} else if err != nil {
 		return err
 	}
 
-	// Update Ingress
-	ingress.Spec = desiredIngress.Spec
-	ingress.Annotations = desiredIngress.Annotations
-	return r.Update(ctx, ingress)
+	// Check if update needed
+	if !reflect.DeepEqual(ingress.Spec, desiredIngress.Spec) ||
+		!reflect.DeepEqual(ingress.Annotations, desiredIngress.Annotations) {
+		ingress.Spec = desiredIngress.Spec
+		ingress.Annotations = desiredIngress.Annotations
+		logger.Info("Updating Ingress", "name", instance.Name)
+		return r.Update(ctx, ingress)
+	}
+
+	return nil
 }
 
 func (r *N8nInstanceReconciler) buildIngress(instance *n8nv1alpha1.N8nInstance) *networkingv1.Ingress {
@@ -757,6 +992,7 @@ func (r *N8nInstanceReconciler) buildLabels(instance *n8nv1alpha1.N8nInstance) m
 	return map[string]string{
 		"app.kubernetes.io/name":       "n8n",
 		"app.kubernetes.io/instance":   instance.Name,
+		"app.kubernetes.io/version":    extractVersion(instance.Spec.Image),
 		"app.kubernetes.io/managed-by": "n8n-operator",
 	}
 }
@@ -766,6 +1002,20 @@ func (r *N8nInstanceReconciler) buildSelectorLabels(instance *n8nv1alpha1.N8nIns
 		"app.kubernetes.io/name":     "n8n",
 		"app.kubernetes.io/instance": instance.Name,
 	}
+}
+
+// extractVersion extracts the version tag from an image reference
+func extractVersion(image string) string {
+	// Simple extraction - looks for :tag
+	for i := len(image) - 1; i >= 0; i-- {
+		if image[i] == ':' {
+			return image[i+1:]
+		}
+		if image[i] == '/' {
+			break
+		}
+	}
+	return "latest"
 }
 
 func (r *N8nInstanceReconciler) updateStatus(ctx context.Context, instance *n8nv1alpha1.N8nInstance, phase, message string) (ctrl.Result, error) {
@@ -820,6 +1070,9 @@ func (r *N8nInstanceReconciler) updateStatusFromDeployment(ctx context.Context, 
 	if deploy.Status.ReadyReplicas > 0 && deploy.Status.ReadyReplicas == deploy.Status.Replicas {
 		phase = "Running"
 		message = "All replicas ready"
+	} else if deploy.Status.Replicas > 0 && deploy.Status.ReadyReplicas == 0 {
+		phase = "Progressing"
+		message = "Waiting for pods to be ready"
 	}
 
 	// Set URL
@@ -829,6 +1082,12 @@ func (r *N8nInstanceReconciler) updateStatusFromDeployment(ctx context.Context, 
 			scheme = "https"
 		}
 		instance.Status.URL = fmt.Sprintf("%s://%s", scheme, instance.Spec.Ingress.Host)
+	} else if instance.Spec.Service != nil {
+		port := int32(5678)
+		if instance.Spec.Service.Port != 0 {
+			port = instance.Spec.Service.Port
+		}
+		instance.Status.URL = fmt.Sprintf("http://%s.%s.svc:%d", instance.Name, instance.Namespace, port)
 	}
 
 	return r.updateStatus(ctx, instance, phase, message)
