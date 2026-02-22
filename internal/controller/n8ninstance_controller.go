@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	promv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -1092,10 +1093,22 @@ func (r *N8nInstanceReconciler) buildSelectorLabels(instance *n8nv1alpha1.N8nIns
 }
 
 // extractVersion extracts the version tag from an image reference
+// Handles formats like: image:tag, image:tag@sha256:..., image@sha256:...
 func extractVersion(image string) string {
+	// Strip digest if present
+	if atIdx := strings.Index(image, "@"); atIdx != -1 {
+		image = image[:atIdx]
+	}
+
+	// Find the version tag after the last colon
 	for i := len(image) - 1; i >= 0; i-- {
 		if image[i] == ':' {
-			return image[i+1:]
+			version := image[i+1:]
+			// Ensure label value doesn't exceed 63 chars
+			if len(version) > 63 {
+				return version[:63]
+			}
+			return version
 		}
 		if image[i] == '/' {
 			break
