@@ -18,6 +18,10 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	n8nv1alpha1 "github.com/shamubernetes/n8n-operator/api/v1alpha1"
@@ -200,5 +205,190 @@ func TestWorkflowHandleDeletion_RetriesBeforeCleanupTimeout(t *testing.T) {
 	}
 	if !hasFinalizer(updated.Finalizers, n8nWorkflowFinalizer) {
 		t.Fatalf("finalizer should remain while retries continue")
+	}
+}
+
+func TestWorkflowUpdateStatus_NoStatusWriteWhenUnchanged(t *testing.T) {
+	lastSync := metav1.NewTime(time.Unix(1700000000, 0))
+	transition := metav1.NewTime(time.Unix(1700000100, 0))
+	workflow := &n8nv1alpha1.N8nWorkflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "wf", Namespace: "services", Generation: 5},
+		Status: n8nv1alpha1.N8nWorkflowStatus{
+			WorkflowID:         "wf-123",
+			Active:             false,
+			WorkflowHash:       "hash-xyz",
+			ObservedGeneration: 5,
+			LastSyncTime:       &lastSync,
+			Conditions: []metav1.Condition{{
+				Type:               "Ready",
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 5,
+				LastTransitionTime: transition,
+				Reason:             "Synced",
+				Message:            "Workflow synced successfully",
+			}},
+		},
+	}
+
+	reconciler := &N8nWorkflowReconciler{}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic, status update should be skipped when unchanged: %v", r)
+		}
+	}()
+
+	result, err := reconciler.updateStatus(
+		context.Background(),
+		workflow,
+		"wf-123",
+		false,
+		"hash-xyz",
+		metav1.ConditionTrue,
+		"Synced",
+		"Workflow synced successfully",
+	)
+	if err != nil {
+		t.Fatalf("updateStatus returned error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Minute {
+		t.Fatalf("unexpected requeue: got %s want %s", result.RequeueAfter, 5*time.Minute)
+	}
+	if workflow.Status.LastSyncTime == nil || !workflow.Status.LastSyncTime.Equal(&lastSync) {
+		t.Fatalf("LastSyncTime changed unexpectedly")
+	}
+}
+
+func TestWorkflowReconcile_SkipsRemoteUpdateWhenAlreadySynced(t *testing.T) {
+	var putCalls int32
+	var activateCalls int32
+	var deactivateCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/workflows":
+			if got, want := r.URL.Query().Get("limit"), "250"; got != want {
+				t.Fatalf("unexpected limit: got %q want %q", got, want)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": []map[string]interface{}{{
+					"id":     "wf-123",
+					"name":   "Nightly sync",
+					"active": false,
+				}},
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/workflows/wf-123":
+			atomic.AddInt32(&putCalls, 1)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":     "wf-123",
+				"name":   "Nightly sync",
+				"active": false,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workflows/wf-123/activate":
+			atomic.AddInt32(&activateCalls, 1)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":     "wf-123",
+				"name":   "Nightly sync",
+				"active": true,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workflows/wf-123/deactivate":
+			atomic.AddInt32(&deactivateCalls, 1)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":     "wf-123",
+				"name":   "Nightly sync",
+				"active": false,
+			})
+		default:
+			t.Fatalf("unexpected n8n request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := n8nv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add n8n scheme: %v", err)
+	}
+
+	apiSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n-api", Namespace: "services"},
+		Data:       map[string][]byte{"api-key": []byte("token")},
+	}
+
+	workflowJSON := []byte(`{"nodes":[{"name":"Trigger","type":"n8n-nodes-base.scheduleTrigger","typeVersion":1}],"connections":{},"settings":{"executionOrder":"v1"}}`)
+	var workflowData map[string]interface{}
+	if err := json.Unmarshal(workflowJSON, &workflowData); err != nil {
+		t.Fatalf("unmarshal workflow json: %v", err)
+	}
+	workflowData["name"] = "Nightly sync"
+	desired := buildWorkflowPayload("Nightly sync", workflowData)
+	workflowHash, err := hashWorkflowPayload(desired)
+	if err != nil {
+		t.Fatalf("hashWorkflowPayload failed: %v", err)
+	}
+
+	now := metav1.NewTime(time.Unix(1700000200, 0))
+	transition := metav1.NewTime(time.Unix(1700000300, 0))
+	workflow := &n8nv1alpha1.N8nWorkflow{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "nightly-sync",
+			Namespace:  "services",
+			Generation: 1,
+			Finalizers: []string{n8nWorkflowFinalizer},
+		},
+		Spec: n8nv1alpha1.N8nWorkflowSpec{
+			N8nInstance: n8nv1alpha1.N8nInstanceRef{
+				URL: server.URL,
+				APIKeySecretRef: n8nv1alpha1.SecretKeyReference{
+					Name: "n8n-api",
+					Key:  "api-key",
+				},
+			},
+			WorkflowName: "Nightly sync",
+			Active:       false,
+			Workflow:     &runtime.RawExtension{Raw: workflowJSON},
+		},
+		Status: n8nv1alpha1.N8nWorkflowStatus{
+			WorkflowID:         "wf-123",
+			Active:             false,
+			WorkflowHash:       workflowHash,
+			ObservedGeneration: 1,
+			LastSyncTime:       &now,
+			Conditions: []metav1.Condition{{
+				Type:               "Ready",
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 1,
+				LastTransitionTime: transition,
+				Reason:             "Synced",
+				Message:            "Workflow synced successfully",
+			}},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&n8nv1alpha1.N8nWorkflow{}).
+		WithObjects(apiSecret, workflow).
+		Build()
+	reconciler := &N8nWorkflowReconciler{Client: client, Scheme: scheme}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: namespacedName("services", "nightly-sync"),
+	})
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Minute {
+		t.Fatalf("unexpected requeue: got %s want %s", result.RequeueAfter, 5*time.Minute)
+	}
+	if got := atomic.LoadInt32(&putCalls); got != 0 {
+		t.Fatalf("expected no remote workflow update, got %d PUT calls", got)
+	}
+	if got := atomic.LoadInt32(&activateCalls); got != 0 {
+		t.Fatalf("expected no activation call, got %d", got)
+	}
+	if got := atomic.LoadInt32(&deactivateCalls); got != 0 {
+		t.Fatalf("expected no deactivation call, got %d", got)
 	}
 }

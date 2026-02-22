@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -146,6 +147,68 @@ func TestIsServiceMonitorUnavailable(t *testing.T) {
 	}
 	if isServiceMonitorUnavailable(context.DeadlineExceeded) {
 		t.Fatalf("unexpected true for unrelated error")
+	}
+}
+
+func TestUpdateStatusFields_NoStatusWriteWhenUnchanged(t *testing.T) {
+	transition := metav1.NewTime(time.Unix(1700000000, 0))
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "n8n",
+			Namespace:  "services",
+			Generation: 7,
+		},
+		Status: n8nv1alpha1.N8nInstanceStatus{
+			Phase:               "Running",
+			Replicas:            1,
+			ReadyReplicas:       1,
+			WorkerReplicas:      0,
+			ReadyWorkerReplicas: 0,
+			URL:                 "http://n8n.services.svc:5678",
+			ObservedGeneration:  7,
+			Conditions: []metav1.Condition{{
+				Type:               "Ready",
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 7,
+				LastTransitionTime: transition,
+				Reason:             "Running",
+				Message:            "All managed deployments are ready",
+			}},
+		},
+	}
+
+	reconciler := &N8nInstanceReconciler{}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic, status update should be skipped when unchanged: %v", r)
+		}
+	}()
+
+	result, err := reconciler.updateStatusFields(
+		context.Background(),
+		instance,
+		"Running",
+		"All managed deployments are ready",
+		1,
+		1,
+		0,
+		0,
+		"http://n8n.services.svc:5678",
+	)
+	if err != nil {
+		t.Fatalf("updateStatusFields returned error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Minute {
+		t.Fatalf("unexpected requeue: got %s want %s", result.RequeueAfter, 5*time.Minute)
+	}
+
+	got := apimeta.FindStatusCondition(instance.Status.Conditions, "Ready")
+	if got == nil {
+		t.Fatalf("missing Ready condition")
+	}
+	if !got.LastTransitionTime.Equal(&transition) {
+		t.Fatalf("Ready LastTransitionTime changed unexpectedly: got %s want %s", got.LastTransitionTime.Time, transition.Time)
 	}
 }
 

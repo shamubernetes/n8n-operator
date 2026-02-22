@@ -18,6 +18,10 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	n8nv1alpha1 "github.com/shamubernetes/n8n-operator/api/v1alpha1"
@@ -203,6 +208,168 @@ func TestCredentialHandleDeletion_RetriesBeforeCleanupTimeout(t *testing.T) {
 	}
 	if !hasFinalizer(updated.Finalizers, n8nCredentialFinalizer) {
 		t.Fatalf("finalizer should remain while retries continue")
+	}
+}
+
+func TestCredentialUpdateStatus_NoStatusWriteWhenUnchanged(t *testing.T) {
+	lastSync := metav1.NewTime(time.Unix(1700000000, 0))
+	transition := metav1.NewTime(time.Unix(1700000100, 0))
+	credential := &n8nv1alpha1.N8nCredential{
+		ObjectMeta: metav1.ObjectMeta{Name: "cred", Namespace: "services", Generation: 3},
+		Status: n8nv1alpha1.N8nCredentialStatus{
+			CredentialID:       "cred-123",
+			CredentialHash:     "hash-abc",
+			ObservedGeneration: 3,
+			LastSyncTime:       &lastSync,
+			Conditions: []metav1.Condition{{
+				Type:               "Ready",
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 3,
+				LastTransitionTime: transition,
+				Reason:             "Synced",
+				Message:            "Credential synced successfully",
+			}},
+		},
+	}
+
+	reconciler := &N8nCredentialReconciler{}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic, status update should be skipped when unchanged: %v", r)
+		}
+	}()
+
+	result, err := reconciler.updateStatus(
+		context.Background(),
+		credential,
+		"cred-123",
+		"hash-abc",
+		metav1.ConditionTrue,
+		"Synced",
+		"Credential synced successfully",
+	)
+	if err != nil {
+		t.Fatalf("updateStatus returned error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Minute {
+		t.Fatalf("unexpected requeue: got %s want %s", result.RequeueAfter, 5*time.Minute)
+	}
+	if credential.Status.LastSyncTime == nil || !credential.Status.LastSyncTime.Equal(&lastSync) {
+		t.Fatalf("LastSyncTime changed unexpectedly")
+	}
+}
+
+func TestCredentialReconcile_SkipsRemoteUpdateWhenAlreadySynced(t *testing.T) {
+	var patchCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/credentials":
+			if got, want := r.URL.Query().Get("limit"), "250"; got != want {
+				t.Fatalf("unexpected limit: got %q want %q", got, want)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": []map[string]interface{}{{
+					"id":   "cred-123",
+					"name": "Postgres account",
+					"type": "postgres",
+				}},
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/credentials/cred-123":
+			atomic.AddInt32(&patchCalls, 1)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":   "cred-123",
+				"name": "Postgres account",
+				"type": "postgres",
+			})
+		default:
+			t.Fatalf("unexpected n8n request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := n8nv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add n8n scheme: %v", err)
+	}
+
+	apiSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n-api", Namespace: "services"},
+		Data:       map[string][]byte{"api-key": []byte("token")},
+	}
+	credSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "postgres-secret", Namespace: "services"},
+		Data:       map[string][]byte{"DB_USER": []byte("alice")},
+	}
+
+	credHash, err := hashCredentialPayload("Postgres account", "postgres", map[string]interface{}{
+		"host": "db.internal",
+		"user": "alice",
+	})
+	if err != nil {
+		t.Fatalf("hashCredentialPayload failed: %v", err)
+	}
+
+	now := metav1.NewTime(time.Unix(1700000200, 0))
+	transition := metav1.NewTime(time.Unix(1700000300, 0))
+	credential := &n8nv1alpha1.N8nCredential{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "postgres-account",
+			Namespace:  "services",
+			Generation: 1,
+			Finalizers: []string{n8nCredentialFinalizer},
+		},
+		Spec: n8nv1alpha1.N8nCredentialSpec{
+			N8nInstance: n8nv1alpha1.N8nInstanceRef{
+				URL: server.URL,
+				APIKeySecretRef: n8nv1alpha1.SecretKeyReference{
+					Name: "n8n-api",
+					Key:  "api-key",
+				},
+			},
+			CredentialName: "Postgres account",
+			CredentialType: "postgres",
+			SecretRef:      &n8nv1alpha1.SecretReference{Name: "postgres-secret"},
+			FieldMappings:  map[string]string{"user": "DB_USER"},
+			Data:           map[string]string{"host": "db.internal"},
+		},
+		Status: n8nv1alpha1.N8nCredentialStatus{
+			CredentialID:       "cred-123",
+			CredentialHash:     credHash,
+			ObservedGeneration: 1,
+			LastSyncTime:       &now,
+			Conditions: []metav1.Condition{{
+				Type:               "Ready",
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 1,
+				LastTransitionTime: transition,
+				Reason:             "Synced",
+				Message:            "Credential synced successfully",
+			}},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&n8nv1alpha1.N8nCredential{}).
+		WithObjects(apiSecret, credSecret, credential).
+		Build()
+	reconciler := &N8nCredentialReconciler{Client: client, Scheme: scheme}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "postgres-account", Namespace: "services"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Minute {
+		t.Fatalf("unexpected requeue: got %s want %s", result.RequeueAfter, 5*time.Minute)
+	}
+	if got := atomic.LoadInt32(&patchCalls); got != 0 {
+		t.Fatalf("expected no remote credential update, got %d PATCH calls", got)
 	}
 }
 
