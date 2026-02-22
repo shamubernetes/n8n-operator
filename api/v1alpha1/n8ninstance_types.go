@@ -166,6 +166,10 @@ type N8nInstanceSpec struct {
 	// HealthCheck configures health check settings.
 	// +optional
 	HealthCheck *HealthCheckConfig `json:"healthCheck,omitempty"`
+
+	// OwnerSetup configures one-time setup of the first n8n owner account.
+	// +optional
+	OwnerSetup *OwnerSetupConfig `json:"ownerSetup,omitempty"`
 }
 
 // DatabaseConfig configures the database connection.
@@ -316,6 +320,41 @@ type SMTPConfig struct {
 	// SSL enables SSL for SMTP.
 	// +optional
 	SSL *bool `json:"ssl,omitempty"`
+}
+
+// OwnerSetupConfig configures initial owner bootstrap.
+type OwnerSetupConfig struct {
+	// Enabled enables owner bootstrap.
+	// If unset, owner bootstrap is enabled when SecretRef is configured.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// SecretRef references a Secret containing owner setup values.
+	// Expected keys: email, firstName, lastName, password.
+	// +optional
+	SecretRef *SecretReference `json:"secretRef,omitempty"`
+
+	// ServiceName overrides the Service used to reach n8n.
+	// Defaults to the N8nInstance name.
+	// +optional
+	ServiceName string `json:"serviceName,omitempty"`
+
+	// RestEndpoint is the n8n REST endpoint path segment.
+	// Defaults to "rest".
+	// +kubebuilder:default="rest"
+	// +optional
+	RestEndpoint string `json:"restEndpoint,omitempty"`
+
+	// JobImage is the image used by the owner setup bootstrap Job.
+	// +kubebuilder:default="curlimages/curl:8.12.1"
+	// +optional
+	JobImage string `json:"jobImage,omitempty"`
+
+	// JobTTLSecondsAfterFinished controls Job cleanup after completion.
+	// +kubebuilder:default=3600
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	JobTTLSecondsAfterFinished *int32 `json:"jobTTLSecondsAfterFinished,omitempty"`
 }
 
 // ExternalHooksConfig configures external hooks.

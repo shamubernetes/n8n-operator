@@ -5046,6 +5046,54 @@ spec:
                   type: string
                 description: NodeSelector for pod scheduling.
                 type: object
+              ownerSetup:
+                description: OwnerSetup configures one-time setup of the first n8n
+                  owner account.
+                properties:
+                  enabled:
+                    description: |-
+                      Enabled enables owner bootstrap.
+                      If unset, owner bootstrap is enabled when SecretRef is configured.
+                    type: boolean
+                  jobImage:
+                    default: curlimages/curl:8.12.1
+                    description: JobImage is the image used by the owner setup bootstrap
+                      Job.
+                    type: string
+                  jobTTLSecondsAfterFinished:
+                    default: 3600
+                    description: JobTTLSecondsAfterFinished controls Job cleanup after
+                      completion.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  restEndpoint:
+                    default: rest
+                    description: |-
+                      RestEndpoint is the n8n REST endpoint path segment.
+                      Defaults to "rest".
+                    type: string
+                  secretRef:
+                    description: |-
+                      SecretRef references a Secret containing owner setup values.
+                      Expected keys: email, firstName, lastName, password.
+                    properties:
+                      name:
+                        description: Name of the Secret
+                        type: string
+                      namespace:
+                        description: Namespace of the Secret (defaults to the resource
+                          namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  serviceName:
+                    description: |-
+                      ServiceName overrides the Service used to reach n8n.
+                      Defaults to the N8nInstance name.
+                    type: string
+                type: object
               persistence:
                 description: Persistence configures persistent storage for n8n data.
                 properties:
