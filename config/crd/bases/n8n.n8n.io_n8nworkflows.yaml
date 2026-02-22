@@ -64,6 +64,15 @@ spec:
                   CredentialMappings maps credential references in the workflow to N8nCredential resources
                   Key is the credential name in the workflow, value is the N8nCredential resource name
                 type: object
+              deletionPolicy:
+                default: Retain
+                description: |-
+                  DeletionPolicy controls behavior when the CR is deleted.
+                  Retain keeps the workflow in n8n, Delete removes it from n8n.
+                enum:
+                - Retain
+                - Delete
+                type: string
               n8nInstance:
                 description: N8nInstance is the reference to the n8n instance
                 properties:

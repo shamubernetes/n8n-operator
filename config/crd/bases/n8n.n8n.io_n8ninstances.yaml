@@ -24,6 +24,9 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
+    - jsonPath: .status.readyWorkerReplicas
+      name: Workers
+      type: integer
     - jsonPath: .status.url
       name: URL
       type: string
@@ -5342,6 +5345,11 @@ spec:
                         description: ClusterNodes for Redis Cluster mode (comma-separated
                           host:port pairs).
                         type: string
+                      db:
+                        description: DB selects the Redis logical database.
+                        format: int32
+                        minimum: 0
+                        type: integer
                       secretRef:
                         description: |-
                           SecretRef references a Secret containing Redis connection details.
@@ -5360,6 +5368,19 @@ spec:
                       ssl:
                         description: SSL enables SSL connection to Redis.
                         type: boolean
+                    type: object
+                  worker:
+                    description: Worker configures dedicated queue worker processes.
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled enables dedicated worker Deployment management.
+                        type: boolean
+                      replicas:
+                        description: Replicas is the number of worker replicas.
+                        format: int32
+                        minimum: 0
+                        type: integer
                     type: object
                 type: object
               replicas:
@@ -7331,12 +7352,17 @@ spec:
                 description: Phase represents the current phase of the n8n instance.
                 enum:
                 - Pending
+                - Progressing
                 - Running
                 - Failed
                 - Unknown
                 type: string
               readyReplicas:
                 description: ReadyReplicas is the number of ready replicas.
+                format: int32
+                type: integer
+              readyWorkerReplicas:
+                description: ReadyWorkerReplicas is the number of ready worker replicas.
                 format: int32
                 type: integer
               replicas:
@@ -7346,6 +7372,11 @@ spec:
               url:
                 description: URL is the URL where n8n is accessible.
                 type: string
+              workerReplicas:
+                description: WorkerReplicas is the number of worker replicas currently
+                  running.
+                format: int32
+                type: integer
             type: object
         type: object
     served: true

@@ -20,6 +20,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// DeletionPolicy controls how the operator handles remote n8n resources on CR deletion.
+type DeletionPolicy string
+
+const (
+	// DeletionPolicyRetain leaves the remote n8n object untouched when the CR is deleted.
+	DeletionPolicyRetain DeletionPolicy = "Retain"
+	// DeletionPolicyDelete removes the remote n8n object when the CR is deleted.
+	DeletionPolicyDelete DeletionPolicy = "Delete"
+)
+
 // N8nCredentialSpec defines the desired state of N8nCredential.
 type N8nCredentialSpec struct {
 	// N8nInstance is the reference to the n8n instance
@@ -33,6 +43,13 @@ type N8nCredentialSpec struct {
 	// CredentialType is the n8n credential type (e.g., postgres, httpHeaderAuth)
 	// +kubebuilder:validation:Required
 	CredentialType string `json:"credentialType"`
+
+	// DeletionPolicy controls behavior when the CR is deleted.
+	// Retain keeps the credential in n8n, Delete removes it from n8n.
+	// +kubebuilder:validation:Enum=Retain;Delete
+	// +kubebuilder:default=Retain
+	// +optional
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
 
 	// SecretRef references a Kubernetes Secret containing credential data.
 	// The Secret can be managed by External Secrets Operator for any backend

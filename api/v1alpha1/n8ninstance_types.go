@@ -217,6 +217,10 @@ type QueueConfig struct {
 	// Health configures queue health checks.
 	// +optional
 	Health *QueueHealthConfig `json:"health,omitempty"`
+
+	// Worker configures dedicated queue worker processes.
+	// +optional
+	Worker *QueueWorkerConfig `json:"worker,omitempty"`
 }
 
 // RedisConfig configures Redis connection.
@@ -233,6 +237,11 @@ type RedisConfig struct {
 	// SSL enables SSL connection to Redis.
 	// +optional
 	SSL *bool `json:"ssl,omitempty"`
+
+	// DB selects the Redis logical database.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	DB *int32 `json:"db,omitempty"`
 }
 
 // BullMQConfig configures BullMQ settings.
@@ -254,6 +263,19 @@ type QueueHealthConfig struct {
 	// +kubebuilder:default=false
 	// +optional
 	Active *bool `json:"active,omitempty"`
+}
+
+// QueueWorkerConfig configures dedicated queue workers.
+type QueueWorkerConfig struct {
+	// Enabled enables dedicated worker Deployment management.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Replicas is the number of worker replicas.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Replicas *int32 `json:"replicas,omitempty"`
 }
 
 // EncryptionConfig configures encryption settings.
@@ -563,7 +585,7 @@ type ProbeConfig struct {
 // N8nInstanceStatus defines the observed state of N8nInstance.
 type N8nInstanceStatus struct {
 	// Phase represents the current phase of the n8n instance.
-	// +kubebuilder:validation:Enum=Pending;Running;Failed;Unknown
+	// +kubebuilder:validation:Enum=Pending;Progressing;Running;Failed;Unknown
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
@@ -574,6 +596,14 @@ type N8nInstanceStatus struct {
 	// ReadyReplicas is the number of ready replicas.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+
+	// WorkerReplicas is the number of worker replicas currently running.
+	// +optional
+	WorkerReplicas int32 `json:"workerReplicas,omitempty"`
+
+	// ReadyWorkerReplicas is the number of ready worker replicas.
+	// +optional
+	ReadyWorkerReplicas int32 `json:"readyWorkerReplicas,omitempty"`
 
 	// URL is the URL where n8n is accessible.
 	// +optional
@@ -594,6 +624,7 @@ type N8nInstanceStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.spec.replicas`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
+// +kubebuilder:printcolumn:name="Workers",type=integer,JSONPath=`.status.readyWorkerReplicas`
 // +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.status.url`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

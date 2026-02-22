@@ -35,6 +35,13 @@ type N8nWorkflowSpec struct {
 	// +kubebuilder:default=false
 	Active bool `json:"active,omitempty"`
 
+	// DeletionPolicy controls behavior when the CR is deleted.
+	// Retain keeps the workflow in n8n, Delete removes it from n8n.
+	// +kubebuilder:validation:Enum=Retain;Delete
+	// +kubebuilder:default=Retain
+	// +optional
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
+
 	// SourceRef references a ConfigMap containing the workflow JSON
 	// +optional
 	SourceRef *WorkflowSourceRef `json:"sourceRef,omitempty"`
