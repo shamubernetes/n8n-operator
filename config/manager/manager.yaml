@@ -30,6 +30,8 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -45,6 +47,7 @@ spec:
           capabilities:
             drop:
               - "ALL"
+          readOnlyRootFilesystem: true
         livenessProbe:
           httpGet:
             path: /healthz
@@ -64,5 +67,11 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmp
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
+      volumes:
+      - name: tmp
+        emptyDir: {}
