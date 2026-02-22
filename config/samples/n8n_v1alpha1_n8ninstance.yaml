@@ -20,6 +20,11 @@ spec:
       name: n8n-encryption
       key: key
 
+  # One-time owner bootstrap (optional)
+  ownerSetup:
+    secretRef:
+      name: n8n-owner  # Keys: email, firstName, lastName, password
+
   # Resource limits
   resources:
     requests:

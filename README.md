@@ -75,6 +75,10 @@ spec:
       name: n8n-encryption
       key: key
 
+  ownerSetup:
+    secretRef:
+      name: n8n-owner # Keys: email, firstName, lastName, password
+
   resources:
     requests:
       cpu: 100m
@@ -154,6 +158,7 @@ spec:
 | `database` | DatabaseConfig | Database configuration (required) |
 | `queue` | QueueConfig | Queue mode with Redis |
 | `encryption` | EncryptionConfig | Encryption key for credentials |
+| `ownerSetup` | OwnerSetupConfig | One-time owner bootstrap Job |
 | `webhook` | WebhookConfig | Webhook URL settings |
 | `smtp` | SMTPConfig | Email configuration |
 | `executions` | ExecutionsConfig | Execution settings |
@@ -173,6 +178,28 @@ spec:
 | `extraVolumeMounts` | []VolumeMount | Additional mounts |
 | `initContainers` | []Container | Init containers |
 | `sidecarContainers` | []Container | Sidecar containers |
+
+### Bootstrap First Owner
+
+You can bootstrap the first n8n owner account and skip manual UI setup:
+
+```yaml
+apiVersion: n8n.n8n.io/v1alpha1
+kind: N8nInstance
+metadata:
+  name: n8n
+spec:
+  database:
+    type: postgresdb
+    secretRef:
+      name: n8n-postgres
+  ownerSetup:
+    secretRef:
+      name: n8n-owner
+```
+
+Create the referenced Secret with keys `email`, `firstName`, `lastName`, and `password`. The operator creates a one-shot Job that calls n8n's owner setup endpoint and treats "already setup" as success.
+Progress is exposed in `.status.conditions` as `OwnerSetupReady`.
 
 ### N8nCredential - Manage Credentials
 
