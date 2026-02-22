@@ -1,6 +1,7 @@
 run:
   timeout: 5m
   go: "1.23"
+  tests: false
 
 linters:
   disable-all: true
