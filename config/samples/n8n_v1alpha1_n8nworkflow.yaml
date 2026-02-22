@@ -1,9 +1,64 @@
+# Example: Workflow from ConfigMap
 apiVersion: n8n.n8n.io/v1alpha1
 kind: N8nWorkflow
 metadata:
-  labels:
-    app.kubernetes.io/name: n8n-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: n8nworkflow-sample
+  name: example-workflow
+  namespace: services
 spec:
-  # TODO(user): Add fields here
+  n8nInstance:
+    url: http://n8n.services.svc:5678
+    apiKeySecretRef:
+      name: n8n-api-key
+      key: api-key
+  workflowName: "Example Workflow"
+  active: false
+  sourceRef:
+    kind: ConfigMap
+    name: n8n-workflows
+    key: example-workflow.json
+  # Optional: Map credential names to N8nCredential resources
+  # The operator will update credential IDs in the workflow
+  credentialMappings:
+    "Postgres account": postgres-account
+---
+# Example: Workflow with inline JSON
+apiVersion: n8n.n8n.io/v1alpha1
+kind: N8nWorkflow
+metadata:
+  name: simple-workflow
+  namespace: services
+spec:
+  n8nInstance:
+    url: http://n8n.services.svc:5678
+    apiKeySecretRef:
+      name: n8n-api-key
+      key: api-key
+  workflowName: "Simple Trigger Workflow"
+  active: true
+  workflow:
+    nodes:
+      - parameters:
+          rule:
+            interval:
+              - field: hours
+                hoursInterval: 1
+        id: schedule-trigger
+        name: Schedule Trigger
+        type: n8n-nodes-base.scheduleTrigger
+        typeVersion: 1.2
+        position: [0, 0]
+      - parameters:
+          options: {}
+        id: no-op
+        name: No Operation
+        type: n8n-nodes-base.noOp
+        typeVersion: 1
+        position: [220, 0]
+    connections:
+      "Schedule Trigger":
+        main:
+          - - node: No Operation
+              type: main
+              index: 0
+    settings:
+      executionOrder: v1
