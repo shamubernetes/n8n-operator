@@ -194,8 +194,8 @@ type DatabaseConfig struct {
 	TablePrefix string `json:"tablePrefix,omitempty"`
 
 	// Logging enables database query logging.
-	// +kubebuilder:validation:Enum=false;error;warn;info;debug
-	// +kubebuilder:default="false"
+	// +kubebuilder:validation:Enum=none;error;warn;info;debug
+	// +kubebuilder:default="none"
 	// +optional
 	Logging string `json:"logging,omitempty"`
 }

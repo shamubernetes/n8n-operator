@@ -617,7 +617,12 @@ func (r *N8nInstanceReconciler) buildEnvVars(ctx context.Context, instance *n8nv
 		env = append(env, corev1.EnvVar{Name: "DB_TABLE_PREFIX", Value: db.TablePrefix})
 	}
 	if db.Logging != "" {
-		env = append(env, corev1.EnvVar{Name: "DB_LOGGING_ENABLED", Value: db.Logging})
+		// Map "none" to "false" for n8n compatibility
+		loggingValue := db.Logging
+		if loggingValue == "none" {
+			loggingValue = "false"
+		}
+		env = append(env, corev1.EnvVar{Name: "DB_LOGGING_ENABLED", Value: loggingValue})
 	}
 
 	if r.queueEnabled(instance) {
