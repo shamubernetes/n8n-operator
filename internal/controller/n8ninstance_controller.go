@@ -450,17 +450,59 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 		return false, err
 	}
 
-	// Compare only the fields we manage to avoid fighting with API server defaults
-	needsUpdate := !apiequality.Semantic.DeepEqual(deploy.Labels, desiredDeploy.Labels) ||
-		!apiequality.Semantic.DeepEqual(deploy.Annotations, desiredDeploy.Annotations) ||
-		!apiequality.Semantic.DeepEqual(deploy.Spec.Replicas, desiredDeploy.Spec.Replicas) ||
-		!apiequality.Semantic.DeepEqual(deploy.Spec.Selector, desiredDeploy.Spec.Selector) ||
-		!apiequality.Semantic.DeepEqual(deploy.Spec.Template, desiredDeploy.Spec.Template)
+	// Compare only the fields we explicitly manage to avoid fighting with API server defaults
+	// Copy desired spec onto current to preserve server-set fields, then compare
+	currentCopy := deploy.DeepCopy()
+	currentCopy.Labels = desiredDeploy.Labels
+	currentCopy.Annotations = desiredDeploy.Annotations
+	currentCopy.Spec.Replicas = desiredDeploy.Spec.Replicas
+	currentCopy.Spec.Template.Labels = desiredDeploy.Spec.Template.Labels
+	currentCopy.Spec.Template.Annotations = desiredDeploy.Spec.Template.Annotations
+	// Update container specs but preserve server defaults
+	if len(currentCopy.Spec.Template.Spec.Containers) > 0 && len(desiredDeploy.Spec.Template.Spec.Containers) > 0 {
+		currentCopy.Spec.Template.Spec.Containers[0].Image = desiredDeploy.Spec.Template.Spec.Containers[0].Image
+		currentCopy.Spec.Template.Spec.Containers[0].Env = desiredDeploy.Spec.Template.Spec.Containers[0].Env
+		currentCopy.Spec.Template.Spec.Containers[0].EnvFrom = desiredDeploy.Spec.Template.Spec.Containers[0].EnvFrom
+		currentCopy.Spec.Template.Spec.Containers[0].Ports = desiredDeploy.Spec.Template.Spec.Containers[0].Ports
+		currentCopy.Spec.Template.Spec.Containers[0].Resources = desiredDeploy.Spec.Template.Spec.Containers[0].Resources
+		currentCopy.Spec.Template.Spec.Containers[0].VolumeMounts = desiredDeploy.Spec.Template.Spec.Containers[0].VolumeMounts
+		currentCopy.Spec.Template.Spec.Containers[0].LivenessProbe = desiredDeploy.Spec.Template.Spec.Containers[0].LivenessProbe
+		currentCopy.Spec.Template.Spec.Containers[0].ReadinessProbe = desiredDeploy.Spec.Template.Spec.Containers[0].ReadinessProbe
+		currentCopy.Spec.Template.Spec.Containers[0].SecurityContext = desiredDeploy.Spec.Template.Spec.Containers[0].SecurityContext
+	}
+	currentCopy.Spec.Template.Spec.Volumes = desiredDeploy.Spec.Template.Spec.Volumes
+	currentCopy.Spec.Template.Spec.SecurityContext = desiredDeploy.Spec.Template.Spec.SecurityContext
+	currentCopy.Spec.Template.Spec.ServiceAccountName = desiredDeploy.Spec.Template.Spec.ServiceAccountName
+	currentCopy.Spec.Template.Spec.NodeSelector = desiredDeploy.Spec.Template.Spec.NodeSelector
+	currentCopy.Spec.Template.Spec.Tolerations = desiredDeploy.Spec.Template.Spec.Tolerations
+	currentCopy.Spec.Template.Spec.Affinity = desiredDeploy.Spec.Template.Spec.Affinity
+
+	needsUpdate := !apiequality.Semantic.DeepEqual(deploy, currentCopy)
 
 	if needsUpdate {
+		// Apply our changes to the current deployment to preserve server-managed fields
 		deploy.Labels = desiredDeploy.Labels
 		deploy.Annotations = desiredDeploy.Annotations
-		deploy.Spec = desiredDeploy.Spec
+		deploy.Spec.Replicas = desiredDeploy.Spec.Replicas
+		deploy.Spec.Template.Labels = desiredDeploy.Spec.Template.Labels
+		deploy.Spec.Template.Annotations = desiredDeploy.Spec.Template.Annotations
+		if len(deploy.Spec.Template.Spec.Containers) > 0 && len(desiredDeploy.Spec.Template.Spec.Containers) > 0 {
+			deploy.Spec.Template.Spec.Containers[0].Image = desiredDeploy.Spec.Template.Spec.Containers[0].Image
+			deploy.Spec.Template.Spec.Containers[0].Env = desiredDeploy.Spec.Template.Spec.Containers[0].Env
+			deploy.Spec.Template.Spec.Containers[0].EnvFrom = desiredDeploy.Spec.Template.Spec.Containers[0].EnvFrom
+			deploy.Spec.Template.Spec.Containers[0].Ports = desiredDeploy.Spec.Template.Spec.Containers[0].Ports
+			deploy.Spec.Template.Spec.Containers[0].Resources = desiredDeploy.Spec.Template.Spec.Containers[0].Resources
+			deploy.Spec.Template.Spec.Containers[0].VolumeMounts = desiredDeploy.Spec.Template.Spec.Containers[0].VolumeMounts
+			deploy.Spec.Template.Spec.Containers[0].LivenessProbe = desiredDeploy.Spec.Template.Spec.Containers[0].LivenessProbe
+			deploy.Spec.Template.Spec.Containers[0].ReadinessProbe = desiredDeploy.Spec.Template.Spec.Containers[0].ReadinessProbe
+			deploy.Spec.Template.Spec.Containers[0].SecurityContext = desiredDeploy.Spec.Template.Spec.Containers[0].SecurityContext
+		}
+		deploy.Spec.Template.Spec.Volumes = desiredDeploy.Spec.Template.Spec.Volumes
+		deploy.Spec.Template.Spec.SecurityContext = desiredDeploy.Spec.Template.Spec.SecurityContext
+		deploy.Spec.Template.Spec.ServiceAccountName = desiredDeploy.Spec.Template.Spec.ServiceAccountName
+		deploy.Spec.Template.Spec.NodeSelector = desiredDeploy.Spec.Template.Spec.NodeSelector
+		deploy.Spec.Template.Spec.Tolerations = desiredDeploy.Spec.Template.Spec.Tolerations
+		deploy.Spec.Template.Spec.Affinity = desiredDeploy.Spec.Template.Spec.Affinity
 		logger.Info("Updating Deployment", "name", name, "component", component)
 		return true, r.Update(ctx, deploy)
 	}
