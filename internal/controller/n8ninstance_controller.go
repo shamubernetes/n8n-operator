@@ -920,7 +920,23 @@ func (r *N8nInstanceReconciler) buildEnvVars(ctx context.Context, instance *n8nv
 		env = append(env, corev1.EnvVar{Name: "N8N_RUNNERS_ENABLED", Value: "true"})
 	}
 
-	env = append(env, instance.Spec.ExtraEnv...)
+	// Merge extraEnv, allowing it to override built-in env vars
+	// This prevents duplicates that cause reconcile loops
+	if len(instance.Spec.ExtraEnv) > 0 {
+		envMap := make(map[string]int, len(env))
+		for i, e := range env {
+			envMap[e.Name] = i
+		}
+		for _, extra := range instance.Spec.ExtraEnv {
+			if idx, exists := envMap[extra.Name]; exists {
+				// Override existing env var
+				env[idx] = extra
+			} else {
+				env = append(env, extra)
+				envMap[extra.Name] = len(env) - 1
+			}
+		}
+	}
 
 	return env, nil
 }
