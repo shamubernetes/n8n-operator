@@ -243,9 +243,15 @@ define go-install-tool
 set -e; \
 package=$(2)@$(3) ;\
 echo "Downloading $${package}" ;\
-rm -f "$(1)" ;\
-GOBIN="$(LOCALBIN)" go install $${package} ;\
-mv "$(LOCALBIN)/$$(basename "$(1)")" "$(1)-$(3)" ;\
+go install $${package} ;\
+gobin="$$(go env GOBIN)"; \
+if [ -z "$$gobin" ]; then gobin="$$(go env GOPATH)/bin"; fi; \
+installed="$$gobin/$$(basename "$(1)")"; \
+[ -f "$$installed" ] || installed="$(LOCALBIN)/$$(basename "$(1)")"; \
+[ -f "$$installed" ] || { echo "Error: could not find installed binary $$installed"; exit 1; }; \
+rm -f "$(1)-$(3)" ;\
+cp "$$installed" "$(1)-$(3)" ;\
+chmod +x "$(1)-$(3)" ;\
 } ;\
 ln -sf "$$(realpath "$(1)-$(3)")" "$(1)"
 endef
