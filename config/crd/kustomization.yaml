@@ -5,6 +5,7 @@ resources:
 - bases/n8n.n8n.io_n8ncredentials.yaml
 - bases/n8n.n8n.io_n8ninstances.yaml
 - bases/n8n.n8n.io_n8nworkflows.yaml
+- bases/n8n.n8n.io_n8nplugins.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

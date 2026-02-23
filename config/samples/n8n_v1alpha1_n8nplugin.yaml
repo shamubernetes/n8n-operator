@@ -1,0 +1,13 @@
+apiVersion: n8n.n8n.io/v1alpha1
+kind: N8nPlugin
+metadata:
+  labels:
+    app.kubernetes.io/name: n8n-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: n8nplugin-sample
+spec:
+  instanceRef:
+    name: n8n
+  packageName: n8n-nodes-base
+  version: latest
+  enabled: true

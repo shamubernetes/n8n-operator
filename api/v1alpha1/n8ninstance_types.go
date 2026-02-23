@@ -669,6 +669,18 @@ type N8nInstanceStatus struct {
 	// +optional
 	URL string `json:"url,omitempty"`
 
+	// PluginCount is the number of enabled plugins resolved for this instance.
+	// +optional
+	PluginCount int32 `json:"pluginCount,omitempty"`
+
+	// PluginHash is the deterministic hash of the resolved plugin set.
+	// +optional
+	PluginHash string `json:"pluginHash,omitempty"`
+
+	// PluginPackages is the resolved list of npm package specs.
+	// +optional
+	PluginPackages []string `json:"pluginPackages,omitempty"`
+
 	// Conditions represent the latest available observations.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
@@ -685,6 +697,7 @@ type N8nInstanceStatus struct {
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.spec.replicas`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
 // +kubebuilder:printcolumn:name="Workers",type=integer,JSONPath=`.status.readyWorkerReplicas`
+// +kubebuilder:printcolumn:name="Plugins",type=integer,JSONPath=`.status.pluginCount`
 // +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.status.url`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

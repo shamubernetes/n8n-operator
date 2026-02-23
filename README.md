@@ -7,6 +7,7 @@ A Kubernetes operator for deploying and managing n8n workflow automation instanc
 The n8n-operator provides a complete solution for running n8n in Kubernetes:
 
 - **N8nInstance** - Deploy and manage n8n applications (Deployment, Service, Ingress, PVC)
+- **N8nPlugin** - Install and reconcile n8n community node packages from npm
 - **N8nCredential** - Manage n8n credentials from Kubernetes Secrets
 - **N8nWorkflow** - Deploy n8n workflows from ConfigMaps or inline JSON
 
@@ -14,6 +15,7 @@ The n8n-operator provides a complete solution for running n8n in Kubernetes:
 
 ### Application Deployment
 - 🚀 **Full n8n Deployment**: Deploy n8n with a single CRD
+- 🧩 **Plugin Management**: Install n8n community plugins declaratively via npm
 - 📊 **Queue Mode Support**: Horizontal scaling with Redis
 - 💾 **Database Support**: PostgreSQL, MySQL, MariaDB, SQLite
 - 🔐 **Encryption**: Automatic credential encryption key management
@@ -254,6 +256,25 @@ spec:
     port: "5432"
 ```
 
+### N8nPlugin - Install Community Nodes
+
+```yaml
+apiVersion: n8n.n8n.io/v1alpha1
+kind: N8nPlugin
+metadata:
+  name: slack-plugin
+  namespace: services
+spec:
+  instanceRef:
+    name: n8n
+  packageName: n8n-nodes-slack
+  version: 1.0.1
+  enabled: true
+```
+
+The operator collects all enabled `N8nPlugin` resources targeting the same `N8nInstance`, installs them with an init container, and mounts the plugin cache into both main and worker pods before n8n starts.
+If `persistence.accessModes` includes `ReadWriteMany`, plugins use a shared PVC cache; otherwise the operator falls back to pod-local cache (`emptyDir`).
+
 ### N8nWorkflow - Deploy Workflows
 
 ```yaml
@@ -312,8 +333,8 @@ spec:
 ```bash
 # Check n8n instance status
 kubectl get n8ninstances
-NAME   PHASE     REPLICAS   READY   URL                      AGE
-n8n    Running   1          1       https://n8n.example.com  5m
+NAME   PHASE     REPLICAS   READY   WORKERS   PLUGINS   URL                      AGE
+n8n    Running   1          1       0         2         https://n8n.example.com  5m
 
 # Check credentials
 kubectl get n8ncredentials

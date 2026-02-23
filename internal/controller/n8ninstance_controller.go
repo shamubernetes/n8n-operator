@@ -39,6 +39,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	n8nv1alpha1 "github.com/shamubernetes/n8n-operator/api/v1alpha1"
@@ -56,6 +57,7 @@ const (
 
 	readyConditionType      = "Ready"
 	ownerSetupConditionType = "OwnerSetupReady"
+	pluginsConditionType    = "PluginsReady"
 )
 
 const ownerSetupJobScript = `
@@ -125,6 +127,7 @@ type N8nInstanceReconciler struct {
 // +kubebuilder:rbac:groups=n8n.n8n.io,resources=n8ninstances/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=n8n.n8n.io,resources=n8ninstances/finalizers,verbs=update
 // +kubebuilder:rbac:groups=n8n.n8n.io,resources=n8ninstances/scale,verbs=get;update;patch
+// +kubebuilder:rbac:groups=n8n.n8n.io,resources=n8nplugins,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
@@ -162,6 +165,31 @@ func (r *N8nInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	r.setDefaults(instance)
 
+	pluginPlan, err := r.resolvePluginInstallPlan(ctx, instance)
+	if err != nil {
+		logger.Error(err, "Failed to resolve N8nPlugin resources")
+		r.setPluginStatusError(instance, err)
+		r.Recorder.Event(instance, corev1.EventTypeWarning, "PluginResolveFailed", err.Error())
+		return r.updateStatus(ctx, instance, "Failed", err.Error())
+	}
+	pluginPlan.UseSharedCache = pluginPlan.Enabled && r.shouldUseSharedPluginCache(instance)
+	previousPluginHash := instance.Status.PluginHash
+	previousPluginCount := instance.Status.PluginCount
+	r.setPluginStatusResolved(instance, pluginPlan)
+	if pluginPlan.Enabled && previousPluginHash != pluginPlan.Hash {
+		r.Recorder.Event(instance, corev1.EventTypeNormal, "PluginsUpdated", fmt.Sprintf("Resolved %d plugins for installation", len(pluginPlan.PackageSpecs)))
+	}
+	if !pluginPlan.Enabled && previousPluginCount > 0 {
+		r.Recorder.Event(instance, corev1.EventTypeNormal, "PluginsUpdated", "No enabled plugins are configured")
+	}
+	if pluginPlan.Enabled && pluginPlan.UseSharedCache {
+		if err := r.reconcilePluginPVC(ctx, instance); err != nil {
+			logger.Error(err, "Failed to reconcile plugin PVC")
+			r.Recorder.Event(instance, corev1.EventTypeWarning, "PluginPVCFailed", err.Error())
+			return r.updateStatus(ctx, instance, "Failed", err.Error())
+		}
+	}
+
 	if instance.Spec.Persistence != nil && (instance.Spec.Persistence.Enabled == nil || *instance.Spec.Persistence.Enabled) {
 		if err := r.reconcilePVC(ctx, instance); err != nil {
 			logger.Error(err, "Failed to reconcile PVC")
@@ -176,7 +204,7 @@ func (r *N8nInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return r.updateStatus(ctx, instance, "Failed", err.Error())
 	}
 
-	mainUpdated, err := r.reconcileDeployment(ctx, instance, n8nComponentMain, instance.Name, r.desiredMainReplicas(instance))
+	mainUpdated, err := r.reconcileDeployment(ctx, instance, n8nComponentMain, instance.Name, r.desiredMainReplicas(instance), pluginPlan)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile main Deployment")
 		r.Recorder.Event(instance, corev1.EventTypeWarning, "DeploymentFailed", err.Error())
@@ -187,7 +215,7 @@ func (r *N8nInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if r.queueWorkerEnabled(instance) {
-		workerUpdated, workerErr := r.reconcileDeployment(ctx, instance, n8nComponentWorker, workerDeploymentName(instance), r.desiredWorkerReplicas(instance))
+		workerUpdated, workerErr := r.reconcileDeployment(ctx, instance, n8nComponentWorker, workerDeploymentName(instance), r.desiredWorkerReplicas(instance), pluginPlan)
 		if workerErr != nil {
 			logger.Error(workerErr, "Failed to reconcile worker Deployment")
 			r.Recorder.Event(instance, corev1.EventTypeWarning, "WorkerDeploymentFailed", workerErr.Error())
@@ -651,13 +679,19 @@ func (r *N8nInstanceReconciler) buildService(instance *n8nv1alpha1.N8nInstance) 
 	return svc
 }
 
-func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instance *n8nv1alpha1.N8nInstance, component, name string, replicas int32) (bool, error) {
+func (r *N8nInstanceReconciler) reconcileDeployment(
+	ctx context.Context,
+	instance *n8nv1alpha1.N8nInstance,
+	component, name string,
+	replicas int32,
+	pluginPlan *pluginInstallPlan,
+) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	deploy := &appsv1.Deployment{}
 	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, deploy)
 
-	desiredDeploy, buildErr := r.buildDeployment(ctx, instance, component, name, replicas)
+	desiredDeploy, buildErr := r.buildDeployment(ctx, instance, component, name, replicas, pluginPlan)
 	if buildErr != nil {
 		return false, buildErr
 	}
@@ -694,9 +728,7 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 		needsUpdate = true
 		updateReasons = append(updateReasons, "template.labels")
 	}
-	// Only compare annotations if desired has some (nil/empty in desired means we don't care)
-	if len(desiredDeploy.Spec.Template.Annotations) > 0 &&
-		!apiequality.Semantic.DeepEqual(deploy.Spec.Template.Annotations, desiredDeploy.Spec.Template.Annotations) {
+	if !apiequality.Semantic.DeepEqual(deploy.Spec.Template.Annotations, desiredDeploy.Spec.Template.Annotations) {
 		needsUpdate = true
 		updateReasons = append(updateReasons, "template.annotations")
 	}
@@ -754,6 +786,10 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 	}
 
 	// Pod spec fields
+	if !apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.InitContainers, desiredDeploy.Spec.Template.Spec.InitContainers) {
+		needsUpdate = true
+		updateReasons = append(updateReasons, "initContainers")
+	}
 	if !apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.Volumes, desiredDeploy.Spec.Template.Spec.Volumes) {
 		needsUpdate = true
 		updateReasons = append(updateReasons, "volumes")
@@ -807,6 +843,7 @@ func (r *N8nInstanceReconciler) reconcileDeployment(ctx context.Context, instanc
 			deploy.Spec.Template.Spec.Containers[0].StartupProbe = desiredDeploy.Spec.Template.Spec.Containers[0].StartupProbe
 			deploy.Spec.Template.Spec.Containers[0].SecurityContext = desiredDeploy.Spec.Template.Spec.Containers[0].SecurityContext
 		}
+		deploy.Spec.Template.Spec.InitContainers = desiredDeploy.Spec.Template.Spec.InitContainers
 		deploy.Spec.Template.Spec.Volumes = desiredDeploy.Spec.Template.Spec.Volumes
 		deploy.Spec.Template.Spec.SecurityContext = desiredDeploy.Spec.Template.Spec.SecurityContext
 		deploy.Spec.Template.Spec.ServiceAccountName = desiredDeploy.Spec.Template.Spec.ServiceAccountName
@@ -832,7 +869,17 @@ func (r *N8nInstanceReconciler) deleteDeploymentIfExists(ctx context.Context, na
 	return r.Delete(ctx, deploy)
 }
 
-func (r *N8nInstanceReconciler) buildDeployment(ctx context.Context, instance *n8nv1alpha1.N8nInstance, component, name string, replicas int32) (*appsv1.Deployment, error) {
+func (r *N8nInstanceReconciler) buildDeployment(
+	ctx context.Context,
+	instance *n8nv1alpha1.N8nInstance,
+	component, name string,
+	replicas int32,
+	pluginPlan *pluginInstallPlan,
+) (*appsv1.Deployment, error) {
+	if pluginPlan == nil {
+		pluginPlan = &pluginInstallPlan{}
+	}
+
 	labels := r.buildLabels(instance, component)
 	selectorLabels := r.buildSelectorLabels(instance, component)
 
@@ -841,7 +888,7 @@ func (r *N8nInstanceReconciler) buildDeployment(ctx context.Context, instance *n
 		return nil, err
 	}
 
-	volumes, volumeMounts := r.buildVolumes(instance, component)
+	volumes, volumeMounts := r.buildVolumes(instance, component, pluginPlan)
 
 	container := corev1.Container{
 		Name:                     "n8n",
@@ -884,6 +931,12 @@ func (r *N8nInstanceReconciler) buildDeployment(ctx context.Context, instance *n
 	if len(instance.Spec.PodAnnotations) > 0 {
 		podAnnotations = instance.Spec.PodAnnotations
 	}
+	if pluginPlan.Enabled {
+		if podAnnotations == nil {
+			podAnnotations = make(map[string]string)
+		}
+		podAnnotations[pluginHashAnnotation] = pluginPlan.Hash
+	}
 
 	podLabels := make(map[string]string)
 	for k, v := range selectorLabels {
@@ -893,6 +946,11 @@ func (r *N8nInstanceReconciler) buildDeployment(ctx context.Context, instance *n
 		for k, v := range instance.Spec.PodLabels {
 			podLabels[k] = v
 		}
+	}
+
+	initContainers := append([]corev1.Container{}, instance.Spec.InitContainers...)
+	if pluginPlan.Enabled {
+		initContainers = append([]corev1.Container{r.buildPluginInstallerInitContainer(instance, pluginPlan)}, initContainers...)
 	}
 
 	replicaCount := replicas
@@ -916,7 +974,7 @@ func (r *N8nInstanceReconciler) buildDeployment(ctx context.Context, instance *n
 				ObjectMeta: metav1.ObjectMeta{Labels: podLabels, Annotations: podAnnotations},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:            instance.Spec.ServiceAccountName,
-					InitContainers:                instance.Spec.InitContainers,
+					InitContainers:                initContainers,
 					Containers:                    containers,
 					Volumes:                       volumes,
 					NodeSelector:                  instance.Spec.NodeSelector,
@@ -1197,7 +1255,11 @@ func secretEnvVar(envName, secretName, key string, optional bool) corev1.EnvVar 
 	}}
 }
 
-func (r *N8nInstanceReconciler) buildVolumes(instance *n8nv1alpha1.N8nInstance, component string) ([]corev1.Volume, []corev1.VolumeMount) {
+func (r *N8nInstanceReconciler) buildVolumes(
+	instance *n8nv1alpha1.N8nInstance,
+	component string,
+	pluginPlan *pluginInstallPlan,
+) ([]corev1.Volume, []corev1.VolumeMount) {
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
 
@@ -1216,6 +1278,27 @@ func (r *N8nInstanceReconciler) buildVolumes(instance *n8nv1alpha1.N8nInstance, 
 			},
 		})
 		mounts = append(mounts, corev1.VolumeMount{Name: "data", MountPath: "/home/node/.n8n"})
+	}
+
+	if pluginPlan.Enabled {
+		pluginVolume := corev1.Volume{
+			Name: pluginVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		}
+		if pluginPlan.UseSharedCache {
+			pluginVolume.VolumeSource = corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pluginPVCName(instance),
+				},
+			}
+		}
+		volumes = append(volumes, pluginVolume)
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      pluginVolumeName,
+			MountPath: pluginVolumeMountPath,
+		})
 	}
 
 	volumes = append(volumes, instance.Spec.ExtraVolumes...)
@@ -1722,6 +1805,7 @@ func (r *N8nInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&networkingv1.Ingress{}).
+		Watches(&n8nv1alpha1.N8nPlugin{}, handler.EnqueueRequestsFromMapFunc(r.mapPluginToInstance)).
 		Named("n8ninstance").
 		Complete(r)
 }

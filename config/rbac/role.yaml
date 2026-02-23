@@ -74,6 +74,7 @@ rules:
   resources:
   - n8ncredentials
   - n8ninstances
+  - n8nplugins
   - n8nworkflows
   verbs:
   - create
@@ -88,6 +89,7 @@ rules:
   resources:
   - n8ncredentials/finalizers
   - n8ninstances/finalizers
+  - n8nplugins/finalizers
   - n8nworkflows/finalizers
   verbs:
   - update
@@ -97,6 +99,7 @@ rules:
   - n8ncredentials/status
   - n8ninstances/scale
   - n8ninstances/status
+  - n8nplugins/status
   - n8nworkflows/status
   verbs:
   - get

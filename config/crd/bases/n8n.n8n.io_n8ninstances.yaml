@@ -27,6 +27,9 @@ spec:
     - jsonPath: .status.readyWorkerReplicas
       name: Workers
       type: integer
+    - jsonPath: .status.pluginCount
+      name: Plugins
+      type: integer
     - jsonPath: .status.url
       name: URL
       type: string
@@ -7425,6 +7428,20 @@ spec:
                 - Failed
                 - Unknown
                 type: string
+              pluginCount:
+                description: PluginCount is the number of enabled plugins resolved
+                  for this instance.
+                format: int32
+                type: integer
+              pluginHash:
+                description: PluginHash is the deterministic hash of the resolved
+                  plugin set.
+                type: string
+              pluginPackages:
+                description: PluginPackages is the resolved list of npm package specs.
+                items:
+                  type: string
+                type: array
               readyReplicas:
                 description: ReadyReplicas is the number of ready replicas.
                 format: int32

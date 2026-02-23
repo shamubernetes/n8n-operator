@@ -2,4 +2,5 @@
 resources:
 - n8n_v1alpha1_n8ncredential.yaml
 - n8n_v1alpha1_n8nworkflow.yaml
+- n8n_v1alpha1_n8nplugin.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

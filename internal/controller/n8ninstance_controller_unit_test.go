@@ -131,7 +131,7 @@ func TestBuildVolumes_PersistenceMountedOnlyForMain(t *testing.T) {
 
 	r := &N8nInstanceReconciler{}
 
-	mainVolumes, mainMounts := r.buildVolumes(instance, n8nComponentMain)
+	mainVolumes, mainMounts := r.buildVolumes(instance, n8nComponentMain, &pluginInstallPlan{})
 	if !hasVolume(mainVolumes, "data") {
 		t.Fatalf("main component should include persistence volume")
 	}
@@ -139,12 +139,97 @@ func TestBuildVolumes_PersistenceMountedOnlyForMain(t *testing.T) {
 		t.Fatalf("main component should mount persistence path")
 	}
 
-	workerVolumes, workerMounts := r.buildVolumes(instance, n8nComponentWorker)
+	workerVolumes, workerMounts := r.buildVolumes(instance, n8nComponentWorker, &pluginInstallPlan{})
 	if hasVolume(workerVolumes, "data") {
 		t.Fatalf("worker component must not include persistence volume")
 	}
 	if hasMount(workerMounts, "data", "/home/node/.n8n") {
 		t.Fatalf("worker component must not mount persistence path")
+	}
+}
+
+func TestBuildVolumes_PluginsMountedForMainAndWorker(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+		Spec: n8nv1alpha1.N8nInstanceSpec{
+			Database: n8nv1alpha1.DatabaseConfig{Type: "postgresdb"},
+		},
+	}
+	plan := &pluginInstallPlan{Enabled: true}
+
+	r := &N8nInstanceReconciler{}
+
+	mainVolumes, mainMounts := r.buildVolumes(instance, n8nComponentMain, plan)
+	if !hasVolume(mainVolumes, pluginVolumeName) {
+		t.Fatalf("main component should include plugin volume")
+	}
+	if !hasMount(mainMounts, pluginVolumeName, pluginVolumeMountPath) {
+		t.Fatalf("main component should mount plugin path")
+	}
+	if !hasEmptyDirVolume(mainVolumes, pluginVolumeName) {
+		t.Fatalf("main component should use pod-local plugin volume when shared cache is disabled")
+	}
+
+	workerVolumes, workerMounts := r.buildVolumes(instance, n8nComponentWorker, plan)
+	if !hasVolume(workerVolumes, pluginVolumeName) {
+		t.Fatalf("worker component should include plugin volume")
+	}
+	if !hasMount(workerMounts, pluginVolumeName, pluginVolumeMountPath) {
+		t.Fatalf("worker component should mount plugin path")
+	}
+	if !hasEmptyDirVolume(workerVolumes, pluginVolumeName) {
+		t.Fatalf("worker component should use pod-local plugin volume when shared cache is disabled")
+	}
+}
+
+func TestBuildVolumes_PluginsUsePVCWhenSharedCacheEnabled(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+		Spec: n8nv1alpha1.N8nInstanceSpec{
+			Database: n8nv1alpha1.DatabaseConfig{Type: "postgresdb"},
+		},
+	}
+	plan := &pluginInstallPlan{Enabled: true, UseSharedCache: true}
+
+	r := &N8nInstanceReconciler{}
+
+	volumes, mounts := r.buildVolumes(instance, n8nComponentMain, plan)
+	if !hasMount(mounts, pluginVolumeName, pluginVolumeMountPath) {
+		t.Fatalf("main component should mount plugin path")
+	}
+	if !hasPVCVolume(volumes, pluginVolumeName, pluginPVCName(instance)) {
+		t.Fatalf("main component should use PVC plugin volume when shared cache is enabled")
+	}
+}
+
+func TestShouldUseSharedPluginCache(t *testing.T) {
+	reconciler := &N8nInstanceReconciler{}
+
+	noPersistence := &n8nv1alpha1.N8nInstance{}
+	if reconciler.shouldUseSharedPluginCache(noPersistence) {
+		t.Fatalf("shared cache should be disabled without persistence access modes")
+	}
+
+	rwo := &n8nv1alpha1.N8nInstance{
+		Spec: n8nv1alpha1.N8nInstanceSpec{
+			Persistence: &n8nv1alpha1.PersistenceConfig{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		},
+	}
+	if reconciler.shouldUseSharedPluginCache(rwo) {
+		t.Fatalf("shared cache should be disabled for RWO access mode")
+	}
+
+	rwx := &n8nv1alpha1.N8nInstance{
+		Spec: n8nv1alpha1.N8nInstanceSpec{
+			Persistence: &n8nv1alpha1.PersistenceConfig{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			},
+		},
+	}
+	if !reconciler.shouldUseSharedPluginCache(rwx) {
+		t.Fatalf("shared cache should be enabled for RWX access mode")
 	}
 }
 
@@ -380,6 +465,117 @@ func TestSyncOwnerSetupCondition_RemovedWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestSetPluginStatusResolved_WithPlugins(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "n8n",
+			Namespace:  "services",
+			Generation: 3,
+		},
+	}
+
+	plan := &pluginInstallPlan{
+		Enabled:      true,
+		Hash:         "deadbeef",
+		PackageSpecs: []string{"n8n-nodes-a@1.0.0", "n8n-nodes-b@2.0.0"},
+	}
+
+	reconciler := &N8nInstanceReconciler{}
+	reconciler.setPluginStatusResolved(instance, plan)
+
+	if got, want := instance.Status.PluginCount, int32(2); got != want {
+		t.Fatalf("unexpected plugin count: got %d want %d", got, want)
+	}
+	if got, want := instance.Status.PluginHash, "deadbeef"; got != want {
+		t.Fatalf("unexpected plugin hash: got %q want %q", got, want)
+	}
+	if len(instance.Status.PluginPackages) != 2 {
+		t.Fatalf("unexpected plugin package count: %d", len(instance.Status.PluginPackages))
+	}
+
+	condition := apimeta.FindStatusCondition(instance.Status.Conditions, pluginsConditionType)
+	if condition == nil {
+		t.Fatalf("missing %s condition", pluginsConditionType)
+	}
+	if condition.Status != metav1.ConditionTrue {
+		t.Fatalf("unexpected condition status: got %s want %s", condition.Status, metav1.ConditionTrue)
+	}
+	if got, want := condition.Reason, "Resolved"; got != want {
+		t.Fatalf("unexpected condition reason: got %q want %q", got, want)
+	}
+}
+
+func TestSetPluginStatusResolved_NoPlugins(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "n8n",
+			Namespace:  "services",
+			Generation: 5,
+		},
+		Status: n8nv1alpha1.N8nInstanceStatus{
+			PluginCount:    1,
+			PluginHash:     "abc",
+			PluginPackages: []string{"n8n-nodes-old@1.0.0"},
+		},
+	}
+
+	reconciler := &N8nInstanceReconciler{}
+	reconciler.setPluginStatusResolved(instance, &pluginInstallPlan{})
+
+	if instance.Status.PluginCount != 0 {
+		t.Fatalf("expected plugin count to be cleared")
+	}
+	if instance.Status.PluginHash != "" {
+		t.Fatalf("expected plugin hash to be cleared")
+	}
+	if len(instance.Status.PluginPackages) != 0 {
+		t.Fatalf("expected plugin packages to be cleared")
+	}
+
+	condition := apimeta.FindStatusCondition(instance.Status.Conditions, pluginsConditionType)
+	if condition == nil {
+		t.Fatalf("missing %s condition", pluginsConditionType)
+	}
+	if condition.Status != metav1.ConditionTrue {
+		t.Fatalf("unexpected condition status: got %s want %s", condition.Status, metav1.ConditionTrue)
+	}
+	if got, want := condition.Reason, "NoPlugins"; got != want {
+		t.Fatalf("unexpected condition reason: got %q want %q", got, want)
+	}
+}
+
+func TestSetPluginStatusError_SetsConditionFalse(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "n8n",
+			Namespace:  "services",
+			Generation: 8,
+		},
+		Status: n8nv1alpha1.N8nInstanceStatus{
+			PluginCount:    2,
+			PluginHash:     "hash",
+			PluginPackages: []string{"n8n-nodes-a@1.0.0", "n8n-nodes-b@2.0.0"},
+		},
+	}
+
+	reconciler := &N8nInstanceReconciler{}
+	reconciler.setPluginStatusError(instance, context.DeadlineExceeded)
+
+	condition := apimeta.FindStatusCondition(instance.Status.Conditions, pluginsConditionType)
+	if condition == nil {
+		t.Fatalf("missing %s condition", pluginsConditionType)
+	}
+	if condition.Status != metav1.ConditionFalse {
+		t.Fatalf("unexpected condition status: got %s want %s", condition.Status, metav1.ConditionFalse)
+	}
+	if got, want := condition.Reason, "ResolveFailed"; got != want {
+		t.Fatalf("unexpected condition reason: got %q want %q", got, want)
+	}
+	if instance.Status.PluginCount != 2 {
+		t.Fatalf("plugin count should remain unchanged on resolve error")
+	}
+}
+
 func assertHasEnv(t *testing.T, env []corev1.EnvVar, name string) {
 	t.Helper()
 	if !hasEnv(env, name) {
@@ -442,6 +638,26 @@ func hasVolume(volumes []corev1.Volume, name string) bool {
 func hasMount(mounts []corev1.VolumeMount, name, path string) bool {
 	for i := range mounts {
 		if mounts[i].Name == name && mounts[i].MountPath == path {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEmptyDirVolume(volumes []corev1.Volume, name string) bool {
+	for i := range volumes {
+		if volumes[i].Name == name && volumes[i].EmptyDir != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPVCVolume(volumes []corev1.Volume, name, claimName string) bool {
+	for i := range volumes {
+		if volumes[i].Name == name &&
+			volumes[i].PersistentVolumeClaim != nil &&
+			volumes[i].PersistentVolumeClaim.ClaimName == claimName {
 			return true
 		}
 	}

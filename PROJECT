@@ -31,4 +31,13 @@ resources:
   kind: N8nWorkflow
   path: github.com/shamubernetes/n8n-operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: n8n.io
+  group: n8n
+  kind: N8nPlugin
+  path: github.com/shamubernetes/n8n-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

@@ -22,6 +22,9 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the n8n-operator itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- n8nplugin_admin_role.yaml
+- n8nplugin_editor_role.yaml
+- n8nplugin_viewer_role.yaml
 - n8nworkflow_admin_role.yaml
 - n8nworkflow_editor_role.yaml
 - n8nworkflow_viewer_role.yaml
