@@ -84,8 +84,9 @@ func TestBuildCredentialData_MergesMappedSecretAndStaticData(t *testing.T) {
 	if got, want := data["host"], "db.internal"; got != want {
 		t.Fatalf("host mismatch: got %v want %v", got, want)
 	}
-	if got, want := data["port"], "5432"; got != want {
-		t.Fatalf("port mismatch: got %v want %v", got, want)
+	// port should be parsed as int64 since "5432" is a valid integer
+	if got, want := data["port"], int64(5432); got != want {
+		t.Fatalf("port mismatch: got %v (%T) want %v (%T)", got, got, want, want)
 	}
 	if got, want := data["user"], "alice"; got != want {
 		t.Fatalf("user mismatch: got %v want %v", got, want)
@@ -384,4 +385,29 @@ func hasFinalizer(finalizers []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func TestParseCredentialValue(t *testing.T) {
+	tests := []struct {
+		input string
+		want  interface{}
+	}{
+		{"5432", int64(5432)},
+		{"0", int64(0)},
+		{"-1", int64(-1)},
+		{"3.14", float64(3.14)},
+		{"true", true},
+		{"false", false},
+		{"hello", "hello"},
+		{"", ""},
+		{"db.internal", "db.internal"},
+		{"password123", "password123"},
+	}
+
+	for _, tt := range tests {
+		got := parseCredentialValue(tt.input)
+		if got != tt.want {
+			t.Errorf("parseCredentialValue(%q) = %v (%T), want %v (%T)", tt.input, got, got, tt.want, tt.want)
+		}
+	}
 }

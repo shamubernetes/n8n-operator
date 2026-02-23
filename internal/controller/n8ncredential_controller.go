@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -228,7 +229,7 @@ func (r *N8nCredentialReconciler) buildCredentialData(ctx context.Context, crede
 	data := make(map[string]interface{})
 
 	for k, v := range credential.Spec.Data {
-		data[k] = v
+		data[k] = parseCredentialValue(v)
 	}
 
 	if credential.Spec.SecretRef != nil {
@@ -237,11 +238,35 @@ func (r *N8nCredentialReconciler) buildCredentialData(ctx context.Context, crede
 			return nil, fmt.Errorf("failed to get secret data: %w", err)
 		}
 		for k, v := range secretData {
-			data[k] = v
+			data[k] = parseCredentialValue(v)
 		}
 	}
 
 	return data, nil
+}
+
+// parseCredentialValue attempts to parse a string value into its appropriate type.
+// n8n API requires numeric fields (like port) to be actual numbers, not strings.
+// This function converts:
+//   - Integer strings ("5432") to int64
+//   - Float strings ("3.14") to float64
+//   - Boolean strings ("true"/"false") to bool
+//   - Everything else remains a string
+func parseCredentialValue(s string) interface{} {
+	// Try parsing as integer first
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return i
+	}
+	// Try parsing as float
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f
+	}
+	// Try parsing as boolean
+	if b, err := strconv.ParseBool(s); err == nil {
+		return b
+	}
+	// Return as string
+	return s
 }
 
 func hashCredentialPayload(name, credType string, data map[string]interface{}) (string, error) {
