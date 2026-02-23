@@ -948,7 +948,7 @@ func (r *N8nInstanceReconciler) buildDeployment(
 		}
 	}
 
-	initContainers := append([]corev1.Container{}, instance.Spec.InitContainers...)
+	initContainers := normalizeContainersWithDefaults(instance.Spec.InitContainers)
 	if pluginPlan.Enabled {
 		initContainers = append([]corev1.Container{r.buildPluginInstallerInitContainer(instance, pluginPlan)}, initContainers...)
 	}
@@ -1794,6 +1794,26 @@ func boolPtr(b bool) *bool {
 
 func ptr[T any](v T) *T {
 	return &v
+}
+
+// normalizeContainersWithDefaults adds Kubernetes default values to containers
+// to prevent reconcile loops caused by DeepEqual comparing against K8s-populated defaults.
+func normalizeContainersWithDefaults(containers []corev1.Container) []corev1.Container {
+	result := make([]corev1.Container, len(containers))
+	for i, c := range containers {
+		result[i] = c
+		// Add K8s defaults if not set
+		if result[i].TerminationMessagePath == "" {
+			result[i].TerminationMessagePath = "/dev/termination-log"
+		}
+		if result[i].TerminationMessagePolicy == "" {
+			result[i].TerminationMessagePolicy = corev1.TerminationMessageReadFile
+		}
+		if result[i].ImagePullPolicy == "" {
+			result[i].ImagePullPolicy = corev1.PullIfNotPresent
+		}
+	}
+	return result
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -240,6 +240,10 @@ func (r *N8nInstanceReconciler) buildPluginInstallerInitContainer(
 			Name:      pluginVolumeName,
 			MountPath: pluginVolumeMountPath,
 		}},
+		// Include Kubernetes defaults to prevent reconcile loops
+		TerminationMessagePath:   "/dev/termination-log",
+		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+		Resources:                corev1.ResourceRequirements{},
 	}
 }
 
