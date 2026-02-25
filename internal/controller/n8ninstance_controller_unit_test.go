@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -54,6 +55,65 @@ func TestQueueReplicaPlanning(t *testing.T) {
 	if got, want := r.desiredWorkerReplicas(instance), int32(6); got != want {
 		t.Fatalf("worker replicas mismatch: got %d want %d", got, want)
 	}
+}
+
+func TestBuildDeploymentStrategy(t *testing.T) {
+	r := &N8nInstanceReconciler{}
+
+	t.Run("defaults to RollingUpdate when unset", func(t *testing.T) {
+		instance := &n8nv1alpha1.N8nInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+			Spec:       n8nv1alpha1.N8nInstanceSpec{},
+		}
+		strategy := r.buildDeploymentStrategy(instance)
+
+		if got, want := strategy.Type, appsv1.RollingUpdateDeploymentStrategyType; got != want {
+			t.Fatalf("strategy type mismatch: got %q want %q", got, want)
+		}
+		if strategy.RollingUpdate == nil {
+			t.Fatalf("RollingUpdate params should be set for RollingUpdate strategy")
+		}
+		if strategy.RollingUpdate.MaxUnavailable.IntVal != 0 {
+			t.Fatalf("MaxUnavailable should be 0, got %d", strategy.RollingUpdate.MaxUnavailable.IntVal)
+		}
+		if strategy.RollingUpdate.MaxSurge.IntVal != 1 {
+			t.Fatalf("MaxSurge should be 1, got %d", strategy.RollingUpdate.MaxSurge.IntVal)
+		}
+	})
+
+	t.Run("explicit RollingUpdate sets params", func(t *testing.T) {
+		instance := &n8nv1alpha1.N8nInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+			Spec: n8nv1alpha1.N8nInstanceSpec{
+				DeploymentStrategy: appsv1.RollingUpdateDeploymentStrategyType,
+			},
+		}
+		strategy := r.buildDeploymentStrategy(instance)
+
+		if got, want := strategy.Type, appsv1.RollingUpdateDeploymentStrategyType; got != want {
+			t.Fatalf("strategy type mismatch: got %q want %q", got, want)
+		}
+		if strategy.RollingUpdate == nil {
+			t.Fatalf("RollingUpdate params should be set for RollingUpdate strategy")
+		}
+	})
+
+	t.Run("Recreate strategy has no RollingUpdate params", func(t *testing.T) {
+		instance := &n8nv1alpha1.N8nInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+			Spec: n8nv1alpha1.N8nInstanceSpec{
+				DeploymentStrategy: appsv1.RecreateDeploymentStrategyType,
+			},
+		}
+		strategy := r.buildDeploymentStrategy(instance)
+
+		if got, want := strategy.Type, appsv1.RecreateDeploymentStrategyType; got != want {
+			t.Fatalf("strategy type mismatch: got %q want %q", got, want)
+		}
+		if strategy.RollingUpdate != nil {
+			t.Fatalf("RollingUpdate params should NOT be set for Recreate strategy")
+		}
+	})
 }
 
 func TestBuildEnvVars_WiresAdvancedSettings(t *testing.T) {

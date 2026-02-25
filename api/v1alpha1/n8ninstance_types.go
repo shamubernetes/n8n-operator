@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -29,6 +30,14 @@ type N8nInstanceSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// DeploymentStrategy defines the strategy for replacing old pods with new ones.
+	// Use "Recreate" when using RWO persistent volumes to avoid deadlock.
+	// Defaults to "RollingUpdate" for backwards compatibility.
+	// +kubebuilder:validation:Enum=RollingUpdate;Recreate
+	// +kubebuilder:default="RollingUpdate"
+	// +optional
+	DeploymentStrategy appsv1.DeploymentStrategyType `json:"deploymentStrategy,omitempty"`
 
 	// Image is the n8n container image to deploy.
 	// +kubebuilder:default="docker.n8n.io/n8nio/n8n:latest"

@@ -963,13 +963,7 @@ func (r *N8nInstanceReconciler) buildDeployment(
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicaCount,
 			Selector: &metav1.LabelSelector{MatchLabels: selectorLabels},
-			Strategy: appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
-					MaxSurge:       &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
-				},
-			},
+			Strategy: r.buildDeploymentStrategy(instance),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: podLabels, Annotations: podAnnotations},
 				Spec: corev1.PodSpec{
@@ -1814,6 +1808,31 @@ func normalizeContainersWithDefaults(containers []corev1.Container) []corev1.Con
 		}
 	}
 	return result
+}
+
+// buildDeploymentStrategy returns the deployment strategy based on instance config.
+// Defaults to RollingUpdate for backwards compatibility.
+func (r *N8nInstanceReconciler) buildDeploymentStrategy(instance *n8nv1alpha1.N8nInstance) appsv1.DeploymentStrategy {
+	strategyType := instance.Spec.DeploymentStrategy
+	// Defense-in-depth: CRD has kubebuilder default, but check here too
+	// in case of CRD upgrades or direct API access bypassing admission.
+	if strategyType == "" {
+		strategyType = appsv1.RollingUpdateDeploymentStrategyType
+	}
+
+	strategy := appsv1.DeploymentStrategy{
+		Type: strategyType,
+	}
+
+	// Only set RollingUpdate params for RollingUpdate strategy
+	if strategyType == appsv1.RollingUpdateDeploymentStrategyType {
+		strategy.RollingUpdate = &appsv1.RollingUpdateDeployment{
+			MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+			MaxSurge:       &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+		}
+	}
+
+	return strategy
 }
 
 // SetupWithManager sets up the controller with the Manager.

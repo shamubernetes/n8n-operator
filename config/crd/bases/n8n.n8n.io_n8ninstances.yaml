@@ -1024,6 +1024,16 @@ spec:
                 required:
                 - type
                 type: object
+              deploymentStrategy:
+                default: RollingUpdate
+                description: |-
+                  DeploymentStrategy defines the strategy for replacing old pods with new ones.
+                  Use "Recreate" when using RWO persistent volumes to avoid deadlock.
+                  Defaults to "RollingUpdate" for backwards compatibility.
+                enum:
+                - RollingUpdate
+                - Recreate
+                type: string
               encryption:
                 description: Encryption configures encryption keys for credentials.
                 properties:
