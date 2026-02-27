@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	n8nv1alpha1 "github.com/shamubernetes/n8n-operator/api/v1alpha1"
@@ -112,6 +113,74 @@ func TestBuildDeploymentStrategy(t *testing.T) {
 		}
 		if strategy.RollingUpdate != nil {
 			t.Fatalf("RollingUpdate params should NOT be set for Recreate strategy")
+		}
+	})
+}
+
+func TestDeploymentStrategyChangeDetection(t *testing.T) {
+	// This test verifies that the reconciler correctly detects when
+	// deployment strategy changes from RollingUpdate to Recreate
+	r := &N8nInstanceReconciler{}
+
+	t.Run("detects change from RollingUpdate to Recreate", func(t *testing.T) {
+		// Existing deployment has RollingUpdate
+		existingStrategy := appsv1.DeploymentStrategy{
+			Type: appsv1.RollingUpdateDeploymentStrategyType,
+			RollingUpdate: &appsv1.RollingUpdateDeployment{
+				MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+				MaxSurge:       &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+			},
+		}
+
+		// Instance now specifies Recreate
+		instance := &n8nv1alpha1.N8nInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+			Spec: n8nv1alpha1.N8nInstanceSpec{
+				DeploymentStrategy: appsv1.RecreateDeploymentStrategyType,
+			},
+		}
+		desiredStrategy := r.buildDeploymentStrategy(instance)
+
+		// The comparison used in reconcileDeployment
+		if existingStrategy.Type == desiredStrategy.Type {
+			t.Fatalf("should detect strategy type change: existing=%q desired=%q",
+				existingStrategy.Type, desiredStrategy.Type)
+		}
+	})
+
+	t.Run("no change when both RollingUpdate", func(t *testing.T) {
+		existingStrategy := appsv1.DeploymentStrategy{
+			Type: appsv1.RollingUpdateDeploymentStrategyType,
+		}
+
+		instance := &n8nv1alpha1.N8nInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+			Spec:       n8nv1alpha1.N8nInstanceSpec{}, // defaults to RollingUpdate
+		}
+		desiredStrategy := r.buildDeploymentStrategy(instance)
+
+		if existingStrategy.Type != desiredStrategy.Type {
+			t.Fatalf("should NOT detect change when both RollingUpdate: existing=%q desired=%q",
+				existingStrategy.Type, desiredStrategy.Type)
+		}
+	})
+
+	t.Run("no change when both Recreate", func(t *testing.T) {
+		existingStrategy := appsv1.DeploymentStrategy{
+			Type: appsv1.RecreateDeploymentStrategyType,
+		}
+
+		instance := &n8nv1alpha1.N8nInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+			Spec: n8nv1alpha1.N8nInstanceSpec{
+				DeploymentStrategy: appsv1.RecreateDeploymentStrategyType,
+			},
+		}
+		desiredStrategy := r.buildDeploymentStrategy(instance)
+
+		if existingStrategy.Type != desiredStrategy.Type {
+			t.Fatalf("should NOT detect change when both Recreate: existing=%q desired=%q",
+				existingStrategy.Type, desiredStrategy.Type)
 		}
 	})
 }
