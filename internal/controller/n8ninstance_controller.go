@@ -802,6 +802,11 @@ func (r *N8nInstanceReconciler) reconcileDeployment(
 		needsUpdate = true
 		updateReasons = append(updateReasons, "serviceAccountName")
 	}
+	// Deployment strategy
+	if deploy.Spec.Strategy.Type != desiredDeploy.Spec.Strategy.Type {
+		needsUpdate = true
+		updateReasons = append(updateReasons, "strategy")
+	}
 	// Only compare these if desired has values
 	if len(desiredDeploy.Spec.Template.Spec.NodeSelector) > 0 &&
 		!apiequality.Semantic.DeepEqual(deploy.Spec.Template.Spec.NodeSelector, desiredDeploy.Spec.Template.Spec.NodeSelector) {
@@ -850,6 +855,7 @@ func (r *N8nInstanceReconciler) reconcileDeployment(
 		deploy.Spec.Template.Spec.NodeSelector = desiredDeploy.Spec.Template.Spec.NodeSelector
 		deploy.Spec.Template.Spec.Tolerations = desiredDeploy.Spec.Template.Spec.Tolerations
 		deploy.Spec.Template.Spec.Affinity = desiredDeploy.Spec.Template.Spec.Affinity
+		deploy.Spec.Strategy = desiredDeploy.Spec.Strategy
 		logger.Info("Updating Deployment", "name", name, "component", component)
 		return true, r.Update(ctx, deploy)
 	}
