@@ -191,6 +191,7 @@ spec:
 | `license` | LicenseConfig | Enterprise license activation key (same-namespace Secret) |
 | `ownerSetup` | OwnerSetupConfig | One-time owner bootstrap Job |
 | `webhook` | WebhookConfig | Webhook URL settings |
+| `endpoints` | EndpointConfig | Endpoint path segments (rest, webhook, webhookTest, webhookWait) |
 | `smtp` | SMTPConfig | Email configuration |
 | `executions` | ExecutionsConfig | Execution settings |
 | `logging` | LoggingConfig | Log level and output |
