@@ -94,6 +94,11 @@ spec:
   webhook:
     url: https://n8n.example.com
 
+  # Endpoint path segments (maps to N8N_ENDPOINT_* env vars)
+  endpoints:
+    rest: api
+    webhook: hooks
+
   # Execution settings
   executions:
     mode: queue

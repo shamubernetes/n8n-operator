@@ -1121,6 +1121,21 @@ func (r *N8nInstanceReconciler) buildEnvVars(ctx context.Context, instance *n8nv
 		}
 	}
 
+	if instance.Spec.Endpoints != nil {
+		if instance.Spec.Endpoints.Rest != "" {
+			env = append(env, corev1.EnvVar{Name: "N8N_ENDPOINT_REST", Value: instance.Spec.Endpoints.Rest})
+		}
+		if instance.Spec.Endpoints.Webhook != "" {
+			env = append(env, corev1.EnvVar{Name: "N8N_ENDPOINT_WEBHOOK", Value: instance.Spec.Endpoints.Webhook})
+		}
+		if instance.Spec.Endpoints.WebhookTest != "" {
+			env = append(env, corev1.EnvVar{Name: "N8N_ENDPOINT_WEBHOOK_TEST", Value: instance.Spec.Endpoints.WebhookTest})
+		}
+		if instance.Spec.Endpoints.WebhookWait != "" {
+			env = append(env, corev1.EnvVar{Name: "N8N_ENDPOINT_WEBHOOK_WAIT", Value: instance.Spec.Endpoints.WebhookWait})
+		}
+	}
+
 	if instance.Spec.SMTP != nil && instance.Spec.SMTP.Enabled != nil && *instance.Spec.SMTP.Enabled {
 		env = append(env, corev1.EnvVar{Name: "N8N_EMAIL_MODE", Value: "smtp"})
 		if instance.Spec.SMTP.SecretRef != nil {

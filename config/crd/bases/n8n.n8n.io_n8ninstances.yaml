@@ -1057,6 +1057,30 @@ spec:
                     - name
                     type: object
                 type: object
+              endpoints:
+                description: Endpoints configures n8n endpoint path segments.
+                properties:
+                  rest:
+                    description: |-
+                      Rest is the path segment for the REST API (N8N_ENDPOINT_REST).
+                      Defaults to "rest" in n8n.
+                    type: string
+                  webhook:
+                    description: |-
+                      Webhook is the path segment for webhook endpoints (N8N_ENDPOINT_WEBHOOK).
+                      Defaults to "webhook" in n8n.
+                    type: string
+                  webhookTest:
+                    description: |-
+                      WebhookTest is the path segment for test webhook endpoints (N8N_ENDPOINT_WEBHOOK_TEST).
+                      Defaults to "webhook-test" in n8n.
+                    type: string
+                  webhookWait:
+                    description: |-
+                      WebhookWait is the path segment for waiting webhook endpoints (N8N_ENDPOINT_WEBHOOK_WAIT).
+                      Defaults to "webhook-waiting" in n8n.
+                    type: string
+                type: object
               executions:
                 description: Executions configures execution settings.
                 properties:

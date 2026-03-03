@@ -246,6 +246,94 @@ func TestBuildEnvVars_WiresAdvancedSettings(t *testing.T) {
 	if hasEnv(env, "DB_POSTGRESDB_HOST") {
 		t.Fatalf("DB_POSTGRESDB_HOST should not be set for mysqldb")
 	}
+
+	// Endpoints is nil, so none of the N8N_ENDPOINT_* vars should be present
+	for _, name := range []string{"N8N_ENDPOINT_REST", "N8N_ENDPOINT_WEBHOOK", "N8N_ENDPOINT_WEBHOOK_TEST", "N8N_ENDPOINT_WEBHOOK_WAIT"} {
+		if hasEnv(env, name) {
+			t.Fatalf("%s should not be set when endpoints is nil", name)
+		}
+	}
+}
+
+func TestBuildEnvVars_EndpointConfig(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+		Spec: n8nv1alpha1.N8nInstanceSpec{
+			Database: n8nv1alpha1.DatabaseConfig{Type: "postgresdb"},
+			Endpoints: &n8nv1alpha1.EndpointConfig{
+				Rest:        "api",
+				Webhook:     "hook",
+				WebhookTest: "hook-test",
+				WebhookWait: "hook-wait",
+			},
+		},
+	}
+
+	r := &N8nInstanceReconciler{}
+	env, err := r.buildEnvVars(context.Background(), instance, n8nComponentMain)
+	if err != nil {
+		t.Fatalf("buildEnvVars failed: %v", err)
+	}
+
+	assertHasEnvValue(t, env, "N8N_ENDPOINT_REST", "api")
+	assertHasEnvValue(t, env, "N8N_ENDPOINT_WEBHOOK", "hook")
+	assertHasEnvValue(t, env, "N8N_ENDPOINT_WEBHOOK_TEST", "hook-test")
+	assertHasEnvValue(t, env, "N8N_ENDPOINT_WEBHOOK_WAIT", "hook-wait")
+}
+
+func TestBuildEnvVars_EndpointPartial(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+		Spec: n8nv1alpha1.N8nInstanceSpec{
+			Database: n8nv1alpha1.DatabaseConfig{Type: "postgresdb"},
+			Endpoints: &n8nv1alpha1.EndpointConfig{
+				Webhook: "custom-webhook",
+			},
+		},
+	}
+
+	r := &N8nInstanceReconciler{}
+	env, err := r.buildEnvVars(context.Background(), instance, n8nComponentMain)
+	if err != nil {
+		t.Fatalf("buildEnvVars failed: %v", err)
+	}
+
+	assertHasEnvValue(t, env, "N8N_ENDPOINT_WEBHOOK", "custom-webhook")
+
+	if hasEnv(env, "N8N_ENDPOINT_REST") {
+		t.Fatalf("N8N_ENDPOINT_REST should not be set when rest is empty")
+	}
+	if hasEnv(env, "N8N_ENDPOINT_WEBHOOK_TEST") {
+		t.Fatalf("N8N_ENDPOINT_WEBHOOK_TEST should not be set when webhookTest is empty")
+	}
+	if hasEnv(env, "N8N_ENDPOINT_WEBHOOK_WAIT") {
+		t.Fatalf("N8N_ENDPOINT_WEBHOOK_WAIT should not be set when webhookWait is empty")
+	}
+}
+
+func TestBuildEnvVars_EndpointWithWebhookPath(t *testing.T) {
+	instance := &n8nv1alpha1.N8nInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n", Namespace: "services"},
+		Spec: n8nv1alpha1.N8nInstanceSpec{
+			Database: n8nv1alpha1.DatabaseConfig{Type: "postgresdb"},
+			Webhook: &n8nv1alpha1.WebhookConfig{
+				Path: "n8n",
+			},
+			Endpoints: &n8nv1alpha1.EndpointConfig{
+				Webhook: "hooks",
+			},
+		},
+	}
+
+	r := &N8nInstanceReconciler{}
+	env, err := r.buildEnvVars(context.Background(), instance, n8nComponentMain)
+	if err != nil {
+		t.Fatalf("buildEnvVars failed: %v", err)
+	}
+
+	// Both should coexist - they are different env vars
+	assertHasEnvValue(t, env, "N8N_PATH", "n8n")
+	assertHasEnvValue(t, env, "N8N_ENDPOINT_WEBHOOK", "hooks")
 }
 
 func TestBuildVolumes_PersistenceMountedOnlyForMain(t *testing.T) {

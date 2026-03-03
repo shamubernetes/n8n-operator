@@ -74,6 +74,10 @@ type N8nInstanceSpec struct {
 	// +optional
 	Webhook *WebhookConfig `json:"webhook,omitempty"`
 
+	// Endpoints configures n8n endpoint path segments.
+	// +optional
+	Endpoints *EndpointConfig `json:"endpoints,omitempty"`
+
 	// SMTP configures email sending.
 	// +optional
 	SMTP *SMTPConfig `json:"smtp,omitempty"`
@@ -334,6 +338,29 @@ type WebhookConfig struct {
 	// Path prefix for webhook URLs.
 	// +optional
 	Path string `json:"path,omitempty"`
+}
+
+// EndpointConfig configures n8n endpoint path segments.
+type EndpointConfig struct {
+	// Rest is the path segment for the REST API (N8N_ENDPOINT_REST).
+	// Defaults to "rest" in n8n.
+	// +optional
+	Rest string `json:"rest,omitempty"`
+
+	// Webhook is the path segment for webhook endpoints (N8N_ENDPOINT_WEBHOOK).
+	// Defaults to "webhook" in n8n.
+	// +optional
+	Webhook string `json:"webhook,omitempty"`
+
+	// WebhookTest is the path segment for test webhook endpoints (N8N_ENDPOINT_WEBHOOK_TEST).
+	// Defaults to "webhook-test" in n8n.
+	// +optional
+	WebhookTest string `json:"webhookTest,omitempty"`
+
+	// WebhookWait is the path segment for waiting webhook endpoints (N8N_ENDPOINT_WEBHOOK_WAIT).
+	// Defaults to "webhook-waiting" in n8n.
+	// +optional
+	WebhookWait string `json:"webhookWait,omitempty"`
 }
 
 // SMTPConfig configures SMTP for sending emails.
