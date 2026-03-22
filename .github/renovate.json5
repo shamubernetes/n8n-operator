@@ -15,6 +15,13 @@
       ],
       depNameTemplate: 'golangci/golangci-lint',
       datasourceTemplate: 'github-releases',
+    },
+  ],
+  packageRules: [
+    {
+      // golangci-lint in Makefile is a Go install, not a GitHub Action — can't pin to digest
+      matchDepNames: ['golangci/golangci-lint'],
+      matchManagers: ['custom.regex'],
       pinDigests: false,
     },
   ],
