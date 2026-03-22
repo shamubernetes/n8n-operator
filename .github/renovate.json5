@@ -19,9 +19,10 @@
   ],
   packageRules: [
     {
-      // golangci-lint in Makefile is a Go install, not a GitHub Action — can't pin to digest
+      // golangci-lint in Makefile is a Go install via custom regex manager.
+      // github-releases datasource can't resolve commit digests — disable pinning.
       matchDepNames: ['golangci/golangci-lint'],
-      matchManagers: ['custom.regex'],
+      matchFileNames: ['Makefile'],
       pinDigests: false,
     },
   ],
