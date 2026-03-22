@@ -17,15 +17,10 @@
       datasourceTemplate: 'github-releases',
     },
   ],
-  packageRules: [
-    {
-      // golangci-lint in Makefile is a Go install via custom regex manager.
-      // github-releases datasource can't resolve commit digests — disable pinning.
-      matchDepNames: ['golangci/golangci-lint'],
-      matchFileNames: ['Makefile'],
-      pinDigests: false,
-    },
-  ],
+  // Disable digest pinning — github-releases datasource (used by Makefile custom manager
+  // for golangci-lint) can't resolve commit digests, causing pin-dependencies to fail.
+  // pinDigests in packageRules doesn't work (evaluated before updateType is decided).
+  pinDigests: false,
   enabled: true,
   configWarningReuseIssue: true,
   configMigration: true,
