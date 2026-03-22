@@ -411,3 +411,191 @@ func TestParseCredentialValue(t *testing.T) {
 		}
 	}
 }
+
+func TestCredentialReconcile_FailedCreateDoesNotStoreHash(t *testing.T) {
+	// Bug: failed creates stored the credentialHash, preventing retries
+	// after the CRD spec is corrected.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/credentials":
+			// No existing credential
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/credentials":
+			// Simulate n8n rejecting the create (e.g., missing required field)
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message": "request.body.data requires property \"disableStartTls\"",
+				"code":    400,
+			})
+		default:
+			t.Fatalf("unexpected n8n request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = n8nv1alpha1.AddToScheme(scheme)
+
+	apiSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n-api", Namespace: "services"},
+		Data:       map[string][]byte{"api-key": []byte("token")},
+	}
+
+	credential := &n8nv1alpha1.N8nCredential{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "smtp-relay",
+			Namespace:  "services",
+			Generation: 1,
+			Finalizers: []string{n8nCredentialFinalizer},
+		},
+		Spec: n8nv1alpha1.N8nCredentialSpec{
+			N8nInstance: n8nv1alpha1.N8nInstanceRef{
+				URL: server.URL,
+				APIKeySecretRef: n8nv1alpha1.SecretKeyReference{
+					Name: "n8n-api",
+					Key:  "api-key",
+				},
+			},
+			CredentialName: "SMTP Relay",
+			CredentialType: "smtp",
+			Data: map[string]string{
+				"host": "smtp.fastmail.com",
+				"port": "465",
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&n8nv1alpha1.N8nCredential{}).
+		WithObjects(apiSecret, credential).
+		Build()
+	reconciler := &N8nCredentialReconciler{Client: client, Scheme: scheme}
+
+	// First reconcile — create fails
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "smtp-relay", Namespace: "services"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	// Check that the hash was NOT stored
+	updated := &n8nv1alpha1.N8nCredential{}
+	if err := client.Get(context.Background(), namespacedName("services", "smtp-relay"), updated); err != nil {
+		t.Fatalf("get credential failed: %v", err)
+	}
+	if updated.Status.CredentialHash != "" {
+		t.Fatalf("expected empty hash after failed create, got %q", updated.Status.CredentialHash)
+	}
+	if updated.Status.CredentialID != "" {
+		t.Fatalf("expected empty credential ID after failed create, got %q", updated.Status.CredentialID)
+	}
+}
+
+func TestCredentialReconcile_RecreatesAfterExternalDeletion(t *testing.T) {
+	// Bug: credential deleted from n8n externally, operator had stale ID,
+	// but hash matched so it skipped recreation.
+	var createCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/credentials":
+			// Credential no longer exists in n8n
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/credentials":
+			atomic.AddInt32(&createCalls, 1)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":   "new-cred-456",
+				"name": "SMTP Relay",
+				"type": "smtp",
+			})
+		default:
+			t.Fatalf("unexpected n8n request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = n8nv1alpha1.AddToScheme(scheme)
+
+	apiSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "n8n-api", Namespace: "services"},
+		Data:       map[string][]byte{"api-key": []byte("token")},
+	}
+
+	credHash, _ := hashCredentialPayload("SMTP Relay", "smtp", map[string]interface{}{
+		"host": "smtp.fastmail.com",
+		"port": int64(465),
+	})
+
+	now := metav1.NewTime(time.Unix(1700000200, 0))
+	transition := metav1.NewTime(time.Unix(1700000300, 0))
+	credential := &n8nv1alpha1.N8nCredential{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "smtp-relay",
+			Namespace:  "services",
+			Generation: 1,
+			Finalizers: []string{n8nCredentialFinalizer},
+		},
+		Spec: n8nv1alpha1.N8nCredentialSpec{
+			N8nInstance: n8nv1alpha1.N8nInstanceRef{
+				URL: server.URL,
+				APIKeySecretRef: n8nv1alpha1.SecretKeyReference{
+					Name: "n8n-api",
+					Key:  "api-key",
+				},
+			},
+			CredentialName: "SMTP Relay",
+			CredentialType: "smtp",
+			Data: map[string]string{
+				"host": "smtp.fastmail.com",
+				"port": "465",
+			},
+		},
+		Status: n8nv1alpha1.N8nCredentialStatus{
+			// Stale ID from before the credential was deleted externally
+			CredentialID:       "old-cred-123",
+			CredentialHash:     credHash,
+			ObservedGeneration: 1,
+			LastSyncTime:       &now,
+			Conditions: []metav1.Condition{{
+				Type:               "Ready",
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 1,
+				LastTransitionTime: transition,
+				Reason:             "Synced",
+				Message:            "Credential synced successfully",
+			}},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&n8nv1alpha1.N8nCredential{}).
+		WithObjects(apiSecret, credential).
+		Build()
+	reconciler := &N8nCredentialReconciler{Client: client, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "smtp-relay", Namespace: "services"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	// Should have called create to recreate the deleted credential
+	if got := atomic.LoadInt32(&createCalls); got != 1 {
+		t.Fatalf("expected 1 create call to recreate externally deleted credential, got %d", got)
+	}
+
+	// Check status was updated with the new ID
+	updated := &n8nv1alpha1.N8nCredential{}
+	if err := client.Get(context.Background(), namespacedName("services", "smtp-relay"), updated); err != nil {
+		t.Fatalf("get credential failed: %v", err)
+	}
+	if updated.Status.CredentialID != "new-cred-456" {
+		t.Fatalf("expected new credential ID 'new-cred-456', got %q", updated.Status.CredentialID)
+	}
+}
