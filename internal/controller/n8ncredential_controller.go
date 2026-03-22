@@ -108,6 +108,14 @@ func (r *N8nCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.updateStatus(ctx, credential, credential.Status.CredentialID, credentialHash, metav1.ConditionFalse, "APIError", err.Error())
 	}
 
+	// If we have a stale credential ID but the credential no longer exists in n8n
+	// (e.g., deleted externally via API or UI), log it and clear the stale ID.
+	if existingCred == nil && credential.Status.CredentialID != "" {
+		logger.Info("Credential was deleted externally from n8n, will recreate",
+			"staleId", credential.Status.CredentialID,
+			"name", credential.Spec.CredentialName)
+	}
+
 	var credID string
 	if existingCred == nil {
 		logger.Info("Creating new credential", "name", credential.Spec.CredentialName)
@@ -115,7 +123,9 @@ func (r *N8nCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		created, createErr := n8nClient.CreateCredential(ctx, newCred)
 		if createErr != nil {
 			logger.Error(createErr, "Failed to create credential")
-			return r.updateStatus(ctx, credential, "", credentialHash, metav1.ConditionFalse, "CreateError", createErr.Error())
+			// Don't store the hash on failure — a stale hash prevents retries
+			// when the CRD spec is corrected (the new hash matches the stored one).
+			return r.updateStatus(ctx, credential, "", "", metav1.ConditionFalse, "CreateError", createErr.Error())
 		}
 		credID = created.ID
 		logger.Info("Created credential", "id", credID)
