@@ -15,9 +15,11 @@
       ],
       depNameTemplate: 'golangci/golangci-lint',
       datasourceTemplate: 'github-releases',
+      pinDigests: false,
     },
   ],
   enabled: true,
   configWarningReuseIssue: true,
   configMigration: true,
+  osvVulnerabilityAlerts: true,
 }
