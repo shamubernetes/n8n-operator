@@ -130,13 +130,16 @@ exec /bin/mkdir "$@"
 			if err := run("failed-dependencies", "n8n:new", "linux:arm64:148", true); err == nil {
 				t.Fatal("expected npm failure to fail the installer")
 			}
-			after, err := os.ReadFile(hashFile)
-			if err != nil || string(before) != string(after) {
-				t.Fatal("failed installation must not publish a new cache key")
+			if _, err := os.Stat(hashFile); !os.IsNotExist(err) {
+				t.Fatalf("failed replacement must leave no success marker: %v", err)
 			}
 			if _, err := os.Stat(filepath.Join(plugins, ".install-lock")); !os.IsNotExist(err) {
 				t.Fatalf("installation lock was not removed: %v", err)
 			}
+			if err := run("dependencies-v2", "n8n:new", "linux:arm64:148", false); err != nil {
+				t.Fatalf("rollback installation failed: %v", err)
+			}
+			calls(6)
 		})
 	}
 }

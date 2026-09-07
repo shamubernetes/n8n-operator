@@ -107,6 +107,8 @@ cat > "${plugin_dir}/package.json" <<EOF
 EOF
 
 cd "${plugin_dir}"
+# A failed replacement must not leave a success marker for the previous tree.
+rm -f "${hash_file}"
 rm -rf node_modules package-lock.json
 npm install --no-audit --no-fund --omit=dev --legacy-peer-deps
 printf '%s' "${cache_key}" > "${hash_file}"
