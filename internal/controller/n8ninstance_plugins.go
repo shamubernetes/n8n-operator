@@ -30,9 +30,14 @@ lock_heartbeat_file="${lock_dir}/heartbeat"
 max_wait_seconds=7200
 stale_lock_seconds=900
 
+# Peers come from n8n, not a second workflow/runtime dependency tree. Include
+# this policy, the image reference and native ABI in every shared-cache check.
+runtime="$(node -p 'process.platform + ":" + process.arch + ":" + process.versions.modules')"
+cache_key="${PLUGIN_HASH}:legacy-peer-deps-v1:${PLUGIN_IMAGE}:${runtime}"
+
 mkdir -p "${plugin_dir}"
 
-if [ -f "${hash_file}" ] && [ "$(cat "${hash_file}")" = "${PLUGIN_HASH}" ]; then
+if [ -f "${hash_file}" ] && [ "$(cat "${hash_file}")" = "${cache_key}" ]; then
 	echo "Plugins already up to date"
 	exit 0
 fi
@@ -40,7 +45,7 @@ fi
 waited=0
 missing_heartbeat_wait=0
 while ! mkdir "${lock_dir}" 2>/dev/null; do
-	if [ -f "${hash_file}" ] && [ "$(cat "${hash_file}")" = "${PLUGIN_HASH}" ]; then
+	if [ -f "${hash_file}" ] && [ "$(cat "${hash_file}")" = "${cache_key}" ]; then
 		echo "Plugins were installed by another pod"
 		exit 0
 	fi
@@ -92,7 +97,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if [ -f "${hash_file}" ] && [ "$(cat "${hash_file}")" = "${PLUGIN_HASH}" ]; then
+if [ -f "${hash_file}" ] && [ "$(cat "${hash_file}")" = "${cache_key}" ]; then
 	echo "Plugins already up to date"
 	exit 0
 fi
@@ -102,9 +107,11 @@ cat > "${plugin_dir}/package.json" <<EOF
 EOF
 
 cd "${plugin_dir}"
+# A failed replacement must not leave a success marker for the previous tree.
+rm -f "${hash_file}"
 rm -rf node_modules package-lock.json
-npm install --no-audit --no-fund --omit=dev
-printf '%s' "${PLUGIN_HASH}" > "${hash_file}"
+npm install --no-audit --no-fund --omit=dev --legacy-peer-deps
+printf '%s' "${cache_key}" > "${hash_file}"
 echo "Installed n8n plugins"
 `
 
@@ -234,6 +241,7 @@ func (r *N8nInstanceReconciler) buildPluginInstallerInitContainer(
 		Command:         []string{"/bin/sh", "-c", pluginInstallerScript},
 		Env: []corev1.EnvVar{
 			{Name: "PLUGIN_HASH", Value: pluginPlan.Hash},
+			{Name: "PLUGIN_IMAGE", Value: instance.Spec.Image},
 			{Name: "PLUGIN_DEPENDENCIES_JSON", Value: pluginPlan.DependenciesJSON},
 		},
 		VolumeMounts: []corev1.VolumeMount{{
